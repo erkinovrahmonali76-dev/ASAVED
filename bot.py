@@ -333,7 +333,16 @@ def _download_audio(url: str, folder: str, yt_args=None):
         info = y.extract_info(url, download=True)
     if info.get("entries"):
         info = info["entries"][0]
-    return f"{folder}/{info['id']}.mp3", info
+    path = f"{folder}/{info['id']}.mp3"
+    if not os.path.exists(path):
+        # fayl nomi boshqacha chiqsa (maxsus belgilar), papkadan mp3 ni topamiz
+        found = sorted(
+            (os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".mp3")),
+            key=os.path.getmtime, reverse=True)
+        if not found:
+            raise RuntimeError("MP3 fayl yaratilmadi (ffmpeg o'rnatilganmi?)")
+        path = found[0]
+    return path, info
 
 
 def title_variants(title: str):
@@ -550,7 +559,7 @@ async def send_mp3(call: CallbackQuery, url: str, fallback: str = None, dur=None
             FSInputFile(path),
             title=info.get("title"),
             performer=info.get("uploader"),
-            duration=info.get("duration"),
+            duration=int(round(float(info.get("duration") or 0))) or None,
             caption=f"🎵 @{BOT_USERNAME}",
         )
         src = (info.get("extractor_key") or platform_of(url)).lower()
