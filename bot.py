@@ -346,7 +346,22 @@ def title_variants(title: str):
     return out
 
 
-def download_audio(url: str, folder: str, fallback: str = None):
+def sc_candidates(q: str, dur=None):
+    opts = base_opts() | {"extract_flat": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as y:
+        info = y.extract_info(f"scsearch8:{q}", download=False)
+    items = [x for x in info.get("entries", []) if x]
+
+    def key(x):
+        d = x.get("duration")
+        return abs(d - dur) if (d and dur) else 9999
+
+    items.sort(key=key)
+    urls = [x.get("webpage_url") or x.get("url") for x in items]
+    return [u for u in urls if u][:6]
+
+
+def download_audio(url: str, folder: str, fallback: str = None, dur=None):
     last = None
     is_yt = "youtube.com" in url or "youtu.be" in url
     for args in (YT_ATTEMPTS if is_yt else [None]):
@@ -356,12 +371,29 @@ def download_audio(url: str, folder: str, fallback: str = None):
             last = ex
             logging.warning("audio urinish xato (%s): %s", args, short_err(ex))
     if fallback:
+        seen, tries = set(), 0
         for q in title_variants(fallback):
             try:
-                return _download_audio(f"scsearch1:{q}", folder)
+                urls = sc_candidates(q, dur)
             except Exception as ex:
                 last = ex
-                logging.warning("SoundCloud xato (%s): %s", q, short_err(ex))
+                logging.warning("SoundCloud qidiruv xato (%s): %s", q, short_err(ex))
+                continue
+            for u in urls:
+                if u in seen or tries >= 8:
+                    continue
+                seen.add(u)
+                tries += 1
+                try:
+                    path, info = _download_audio(u, folder)
+                    d = info.get("duration")
+                    if dur and d and abs(d - dur) > max(25, dur * 0.15):
+                        last = RuntimeError(f"davomiylik mos emas ({d}s, kutilgan {dur}s)")
+                        continue
+                    return path, info
+                except Exception as ex:
+                    last = ex
+                    logging.warning("SoundCloud xato (%s): %s", u, short_err(ex))
     raise last
 
 
@@ -506,12 +538,12 @@ async def text_handler(m: Message):
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
-async def send_mp3(call: CallbackQuery, url: str, fallback: str = None):
+async def send_mp3(call: CallbackQuery, url: str, fallback: str = None, dur=None):
     uid = call.from_user.id
     wait = await call.message.answer("⏳ MP3 tayyorlanmoqda...")
     tmp = tempfile.mkdtemp()
     try:
-        path, info = await asyncio.to_thread(download_audio, url, tmp, fallback)
+        path, info = await asyncio.to_thread(download_audio, url, tmp, fallback, dur)
         if os.path.getsize(path) > MAX_SIZE:
             return await call.message.answer("⚠️ Fayl 50 MB dan katta.")
         await call.message.answer_audio(
@@ -547,7 +579,7 @@ async def pick_song(call: CallbackQuery):
         return await call.message.answer(limit_text(), parse_mode="HTML")
     await call.answer("Yuklanmoqda...")
     song = results[int(idx)]
-    await send_mp3(call, f"https://www.youtube.com/watch?v={song['id']}", song["title"])
+    await send_mp3(call, f"https://www.youtube.com/watch?v={song['id']}", song["title"], song["dur"])
 
 
 @main.callback_query(F.data.startswith("a:"))
