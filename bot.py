@@ -42,7 +42,10 @@ def remember(store: dict, key, value):
 def base_opts():
     o = {"quiet": True, "noplaylist": True, "no_warnings": True}
     if COOKIES and os.path.exists(COOKIES):
-        o["cookiefile"] = COOKIES
+        local = "/tmp/cookies.txt"
+        if not os.path.exists(local):
+            shutil.copy(COOKIES, local)  # Render secret fayli faqat o'qiladi
+        o["cookiefile"] = local
     return o
 
 
@@ -63,7 +66,17 @@ def search_music(query: str):
     ]
 
 
-def download_audio(url: str, folder: str):
+def download_audio(url: str, folder: str, fallback: str = None):
+    try:
+        return _download_audio(url, folder)
+    except Exception:
+        if not fallback:
+            raise
+        logging.exception("YouTube xato, SoundCloud'dan urinaman")
+        return _download_audio(f"scsearch1:{fallback}", folder)
+
+
+def _download_audio(url: str, folder: str):
     opts = base_opts() | {
         "format": "bestaudio/best",
         "outtmpl": f"{folder}/%(id)s.%(ext)s",
@@ -75,6 +88,8 @@ def download_audio(url: str, folder: str):
     }
     with yt_dlp.YoutubeDL(opts) as y:
         info = y.extract_info(url, download=True)
+    if info.get("entries"):
+        info = info["entries"][0]
     return f"{folder}/{info['id']}.mp3", info
 
 
@@ -192,11 +207,11 @@ async def text_handler(m: Message):
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
-async def send_mp3(call: CallbackQuery, url: str):
+async def send_mp3(call: CallbackQuery, url: str, fallback: str = None):
     wait = await call.message.answer("⏳ MP3 tayyorlanmoqda...")
     tmp = tempfile.mkdtemp()
     try:
-        path, info = await asyncio.to_thread(download_audio, url, tmp)
+        path, info = await asyncio.to_thread(download_audio, url, tmp, fallback)
         if os.path.getsize(path) > MAX_SIZE:
             return await call.message.answer("⚠️ Fayl 50 MB dan katta.")
         await call.message.answer_audio(
@@ -221,8 +236,8 @@ async def pick_song(call: CallbackQuery):
     if not results:
         return await call.answer("Qidiruv eskirgan, qaytadan yozing.", show_alert=True)
     await call.answer("Yuklanmoqda...")
-    vid = results[int(idx)]["id"]
-    await send_mp3(call, f"https://www.youtube.com/watch?v={vid}")
+    song = results[int(idx)]
+    await send_mp3(call, f"https://www.youtube.com/watch?v={song['id']}", song["title"])
 
 
 @dp.callback_query(F.data.startswith("a:"))
