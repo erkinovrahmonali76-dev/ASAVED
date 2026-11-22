@@ -35,6 +35,7 @@ OWNERS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",")
 COOKIES = os.getenv("COOKIES_FILE")
 PROXY = os.getenv("PROXY_URL")
 MAX_SIZE = 50 * 1024 * 1024
+AUDIO_QUALITY = os.getenv("AUDIO_QUALITY", "128")  # kbps; YouTube manbasi ~128k, 192 faqat faylni kattalashtiradi
 
 bot = Bot(TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -118,6 +119,8 @@ async def db_init():
         ALTER TABLE downloads ADD COLUMN IF NOT EXISTS ok BOOLEAN DEFAULT TRUE;
         ALTER TABLE downloads ADD COLUMN IF NOT EXISTS err TEXT;
         ALTER TABLE downloads ADD COLUMN IF NOT EXISTS query TEXT;
+        CREATE TABLE IF NOT EXISTS audio_cache(
+            vid TEXT PRIMARY KEY, file_id TEXT, ts TIMESTAMPTZ DEFAULT now());
         """)
         CFG.update(DEFAULTS)
         for r in await c.fetch("SELECT key, value FROM settings"):
@@ -282,7 +285,8 @@ dp.callback_query.outer_middleware(Gate())
 
 # ====================== YUKLASH FUNKSIYALARI ======================
 def base_opts():
-    o = {"quiet": True, "noplaylist": True, "no_warnings": True, "socket_timeout": 20}
+    o = {"quiet": True, "noplaylist": True, "no_warnings": True, "socket_timeout": 20,
+         "concurrent_fragment_downloads": 4}
     if COOKIES and os.path.exists(COOKIES):
         local = "/tmp/cookies.txt"
         if not os.path.exists(local):
@@ -316,16 +320,17 @@ YT_ATTEMPTS = [
     {"player_client": ["android_vr"]},
     {"player_client": ["mweb"]},
 ]
+_YT_BEST = {"i": 0}  # oxirgi ishlagan klient: keyingi qo'shiqda birinchi shuni sinaymiz
 
 
 def _download_audio(url: str, folder: str, yt_args=None):
     opts = base_opts() | {
-        "format": "bestaudio/best",
+        "format": "bestaudio[ext=m4a]/bestaudio/best",
         "outtmpl": f"{folder}/%(id)s.%(ext)s",
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
             "preferredcodec": "mp3",
-            "preferredquality": "192",
+            "preferredquality": AUDIO_QUALITY,
         }],
     }
     if yt_args:
@@ -380,15 +385,53 @@ def sc_candidates(q: str, dur=None):
     return urls[:6]
 
 
+def yt_alternatives(q: str, dur=None, skip_id=None):
+    """Shu qo'shiqning boshqa YouTube yuklamalari (davomiyligi mos kelganlari)."""
+    opts = base_opts() | {"extract_flat": True, "skip_download": True}
+    with yt_dlp.YoutubeDL(opts) as y:
+        info = y.extract_info(f"ytsearch8:{q}", download=False)
+    out = []
+    for x in info.get("entries", []):
+        if not x or x.get("id") == skip_id:
+            continue
+        d = x.get("duration")
+        if dur and d and abs(d - dur) > max(25, dur * 0.15):
+            continue
+        out.append(f"https://www.youtube.com/watch?v={x['id']}")
+    return out[:3]
+
+
 def download_audio(url: str, folder: str, fallback: str = None, dur=None):
     yt_errs, sc_err = [], None
     is_yt = "youtube.com" in url or "youtu.be" in url
-    for args in (YT_ATTEMPTS if is_yt else [None]):
+    if is_yt:
+        i0 = _YT_BEST["i"] % len(YT_ATTEMPTS)
+        order = list(range(i0, len(YT_ATTEMPTS))) + list(range(i0))
+    else:
+        order = [None]
+    for idx in order:
+        args = YT_ATTEMPTS[idx] if idx is not None else None
         try:
-            return _download_audio(url, folder, args)
+            res = _download_audio(url, folder, args)
+            if idx is not None:
+                _YT_BEST["i"] = idx
+            return res
         except Exception as ex:
             yt_errs.append(short_err(ex))
             logging.warning("audio urinish xato (%s): %s", args, short_err(ex))
+    # IP butunlay bloklangan bo'lsa (bot deb gumon), boshqa yuklamalar ham ishlamaydi
+    blocked = any("confirm you" in s or "not a bot" in s for s in yt_errs)
+    if is_yt and fallback and not blocked:
+        m_id = re.search(r"(?:v=|youtu\.be/)([\w-]{11})", url)
+        try:
+            for alt in yt_alternatives(fallback, dur, m_id.group(1) if m_id else None):
+                for args in (None, {"player_client": ["ios"]}):
+                    try:
+                        return _download_audio(alt, folder, args)
+                    except Exception as ex:
+                        logging.warning("muqobil yuklama xato (%s): %s", alt, short_err(ex))
+        except Exception as ex:
+            logging.warning("muqobil qidiruv xato: %s", short_err(ex))
     if fallback:
         seen, tries = set(), 0
         for q in title_variants(fallback):
@@ -568,22 +611,69 @@ async def text_handler(m: Message):
                    reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
 
 
+YT_ID_RE = re.compile(r"(?:v=|youtu\.be/)([\w-]{11})")
+
+
+async def cache_get(vid):
+    try:
+        async with pool.acquire() as c:
+            return await c.fetchval("SELECT file_id FROM audio_cache WHERE vid=$1", vid)
+    except Exception:
+        logging.exception("cache_get")
+        return None
+
+
+async def cache_put(vid, file_id):
+    try:
+        async with pool.acquire() as c:
+            await c.execute(
+                "INSERT INTO audio_cache(vid, file_id) VALUES($1,$2) "
+                "ON CONFLICT(vid) DO UPDATE SET file_id=$2, ts=now()", vid, file_id)
+    except Exception:
+        logging.exception("cache_put")
+
+
+async def cache_del(vid):
+    try:
+        async with pool.acquire() as c:
+            await c.execute("DELETE FROM audio_cache WHERE vid=$1", vid)
+    except Exception:
+        logging.exception("cache_del")
+
+
 async def send_mp3(call: CallbackQuery, url: str, fallback: str = None, dur=None):
     uid = call.from_user.id
+    m_id = YT_ID_RE.search(url)
+    vid = m_id.group(1) if m_id else None
+
+    # Oldin yuklangan qo'shiq bo'lsa — darrov file_id bilan yuboramiz
+    if vid:
+        fid = await cache_get(vid)
+        if fid:
+            try:
+                await call.message.answer_audio(fid, caption=f"🎵 @{BOT_USERNAME}")
+                await log_dl(uid, "music", "cache", query=(fallback or "")[:200])
+                return
+            except Exception:
+                logging.warning("cache file_id ishlamadi, qayta yuklanadi")
+                await cache_del(vid)
+
     wait = await call.message.answer("⏳ MP3 tayyorlanmoqda...")
     tmp = tempfile.mkdtemp()
     try:
         path, info = await asyncio.to_thread(download_audio, url, tmp, fallback, dur)
         if os.path.getsize(path) > MAX_SIZE:
             return await call.message.answer("⚠️ Fayl 50 MB dan katta.")
-        await call.message.answer_audio(
+        sent = await call.message.answer_audio(
             FSInputFile(path),
             title=info.get("title"),
             performer=info.get("uploader"),
             duration=int(round(float(info.get("duration") or 0))) or None,
             caption=f"🎵 @{BOT_USERNAME}",
         )
-        src = (info.get("extractor_key") or platform_of(url)).lower()
+        if vid and sent.audio:
+            await cache_put(vid, sent.audio.file_id)
+        src =(info.get("extractor_key") or platform_of(url)).lower()
         await log_dl(uid, "music", src, query=(fallback or info.get("title") or "")[:200])
     except Exception as ex:
         logging.exception("audio error")
