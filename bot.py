@@ -314,6 +314,7 @@ YT_ATTEMPTS = [
     {"player_client": ["tv", "web_safari"]},
     {"player_client": ["ios"]},
     {"player_client": ["android_vr"]},
+    {"player_client": ["mweb"]},
 ]
 
 
@@ -366,18 +367,27 @@ def sc_candidates(q: str, dur=None):
         return abs(d - dur) if (d and dur) else 9999
 
     items.sort(key=key)
-    urls = [x.get("webpage_url") or x.get("url") for x in items]
-    return [u for u in urls if u][:6]
+    urls = []
+    for x in items:
+        u = x.get("webpage_url") or x.get("url")
+        d = x.get("duration")
+        if not u:
+            continue
+        # davomiyligi mos kelmaydigan treklarni yuklamasdan oldin o'tkazib yuboramiz
+        if dur and d and abs(d - dur) > max(25, dur * 0.15):
+            continue
+        urls.append(u)
+    return urls[:6]
 
 
 def download_audio(url: str, folder: str, fallback: str = None, dur=None):
-    last = None
+    yt_errs, sc_err = [], None
     is_yt = "youtube.com" in url or "youtu.be" in url
     for args in (YT_ATTEMPTS if is_yt else [None]):
         try:
             return _download_audio(url, folder, args)
         except Exception as ex:
-            last = ex
+            yt_errs.append(short_err(ex))
             logging.warning("audio urinish xato (%s): %s", args, short_err(ex))
     if fallback:
         seen, tries = set(), 0
@@ -385,9 +395,11 @@ def download_audio(url: str, folder: str, fallback: str = None, dur=None):
             try:
                 urls = sc_candidates(q, dur)
             except Exception as ex:
-                last = ex
+                sc_err = short_err(ex)
                 logging.warning("SoundCloud qidiruv xato (%s): %s", q, short_err(ex))
                 continue
+            if not urls:
+                sc_err = "mos trek topilmadi"
             for u in urls:
                 if u in seen or tries >= 8:
                     continue
@@ -397,13 +409,22 @@ def download_audio(url: str, folder: str, fallback: str = None, dur=None):
                     path, info = _download_audio(u, folder)
                     d = info.get("duration")
                     if dur and d and abs(d - dur) > max(25, dur * 0.15):
-                        last = RuntimeError(f"davomiylik mos emas ({d}s, kutilgan {dur}s)")
+                        sc_err = f"davomiylik mos emas ({d}s, kutilgan {dur}s)"
+                        try:
+                            os.remove(path)
+                        except OSError:
+                            pass
                         continue
                     return path, info
                 except Exception as ex:
-                    last = ex
+                    sc_err = short_err(ex)
                     logging.warning("SoundCloud xato (%s): %s", u, short_err(ex))
-    raise last
+    # Asosiy sabab (birinchi YouTube xatosi) ko'rinib tursin
+    first = yt_errs[0] if yt_errs else "noma'lum xato"
+    msg = f"{'YouTube' if is_yt else 'Yuklash'}: {first[:230]}"
+    if sc_err:
+        msg += f" | SoundCloud: {sc_err[:50]}"
+    raise RuntimeError(msg)
 
 
 def download_video(url: str, folder: str):
