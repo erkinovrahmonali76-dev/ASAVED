@@ -5,8 +5,10 @@ import uuid
 import shutil
 import asyncio
 import logging
+import time
 import tempfile
 import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
@@ -46,6 +48,14 @@ bot = Bot(TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
 admin = Router()
 main = Router()
+
+# Yuklash/qidirish uchun alohida thread pool: foydalanuvchilar bir-birini kutib qolmasin
+EXECUTOR = ThreadPoolExecutor(max_workers=int(os.getenv("WORKERS", "16")))
+
+
+async def run(fn, *args):
+    return await asyncio.get_running_loop().run_in_executor(EXECUTOR, fn, *args)
+
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "asaved_bot")
 URL_RE = re.compile(r"https?://\S+")
@@ -271,8 +281,12 @@ dp.callback_query.outer_middleware(Gate())
 
 # ====================== YUKLASH FUNKSIYALARI ======================
 def base_opts():
-    o = {"quiet": True, "noplaylist": True, "no_warnings": True, "socket_timeout": 20,
-         "concurrent_fragment_downloads": 4}
+    o = {"quiet": True, "noplaylist": True, "no_warnings": True, "socket_timeout": 15,
+         "concurrent_fragment_downloads": 4,
+         # xato bo'lsa uzoq qayta urinmaymiz (standart 10 marta — shu "qotib qolish" sababi)
+         "retries": 2, "fragment_retries": 2, "extractor_retries": 1,
+         # YouTube tezlikni cheklashini (throttle) chetlab o'tadi
+         "http_chunk_size": 10 * 1024 * 1024}
     if COOKIES and os.path.exists(COOKIES):
         local = "/tmp/cookies.txt"
         if not os.path.exists(local):
@@ -311,7 +325,8 @@ _YT_BEST = {"i": 0}  # oxirgi ishlagan klient: keyingi qo'shiqda birinchi shuni 
 
 def _download_audio(url: str, folder: str, yt_args=None):
     opts = base_opts() | {
-        "format": "bestaudio[ext=m4a]/bestaudio/best",
+        # 140 = 128 kbps m4a: eng kichik va tez; kerak bo'lmasa keyingilariga o'tadi
+        "format": "140/bestaudio[ext=m4a]/bestaudio/best",
         "outtmpl": f"{folder}/%(id)s.%(ext)s",
         "postprocessors": [{
             "key": "FFmpegExtractAudio",
@@ -385,26 +400,52 @@ def yt_alternatives(q: str, dur=None, skip_id=None):
     return out[:3]
 
 
+_YT_BLOCK = {"until": 0.0}  # YouTube IP ni bloklagan bo'lsa, shu vaqtgacha uni qayta-qayta urmaymiz
+DL_BUDGET = int(os.getenv("DL_BUDGET", "75"))  # bitta qo'shiq uchun umumiy vaqt chegarasi (soniya)
+
+
+def _is_block(s: str) -> bool:
+    s = s.lower()
+    return "confirm you" in s or "not a bot" in s
+
+
 def download_audio(url: str, folder: str, fallback: str = None, dur=None):
-    yt_errs, sc_err = [], None
+    t0 = time.monotonic()
+
+    def left():
+        return DL_BUDGET - (time.monotonic() - t0)
+
+    yt_errs, sc_err, n_block = [], None, 0
     is_yt = "youtube.com" in url or "youtu.be" in url
     if is_yt:
         i0 = _YT_BEST["i"] % len(YT_ATTEMPTS)
         order = list(range(i0, len(YT_ATTEMPTS))) + list(range(i0))
+        if fallback and time.time() < _YT_BLOCK["until"]:
+            order = order[:1]  # IP yaqinda bloklangan: bitta urinish, keyin darrov SoundCloud
     else:
         order = [None]
     for idx in order:
+        if left() <= 0:
+            break
         args = YT_ATTEMPTS[idx] if idx is not None else None
         try:
             res = _download_audio(url, folder, args)
             if idx is not None:
                 _YT_BEST["i"] = idx
+                _YT_BLOCK["until"] = 0.0
             return res
         except Exception as ex:
-            yt_errs.append(short_err(ex))
-            logging.warning("audio urinish xato (%s): %s", args, short_err(ex))
-    blocked = any("confirm you" in s or "not a bot" in s for s in yt_errs)
-    if is_yt and fallback and not blocked:
+            s = short_err(ex)
+            yt_errs.append(s)
+            logging.warning("audio urinish xato (%s): %s", args, s)
+            if _is_block(s):
+                n_block += 1
+                if n_block >= 2:  # bu IP darajasidagi blok: boshqa klientlar ham yordam bermaydi
+                    break
+    blocked = n_block >= 2 or (n_block >= 1 and len(order) == 1)
+    if is_yt and blocked:
+        _YT_BLOCK["until"] = time.time() + 300
+    if is_yt and fallback and not blocked and left() > 20:
         m_id = re.search(r"(?:v=|youtu\.be/)([\w-]{11})", url)
         try:
             for alt in yt_alternatives(fallback, dur, m_id.group(1) if m_id else None):
@@ -427,7 +468,7 @@ def download_audio(url: str, folder: str, fallback: str = None, dur=None):
             if not urls:
                 sc_err = "mos trek topilmadi"
             for u in urls:
-                if u in seen or tries >= 8:
+                if u in seen or tries >= 5 or left() <= 0:
                     continue
                 seen.add(u)
                 tries += 1
@@ -588,7 +629,7 @@ async def voice_handler(m: Message):
         query = f"{artist} - {title}".strip(" -")
         await log_dl(uid, "voice", "shazam", query=query[:200])
         try:
-            results = await asyncio.to_thread(search_music, query)
+            results = await run(search_music, query)
         except Exception as ex:
             logging.exception("voice search error")
             results = []
@@ -656,7 +697,7 @@ async def text_handler(m: Message):
         return await m.answer(OFF)
     wait = await m.answer("🔍 Qidirilmoqda...")
     try:
-        results = await asyncio.to_thread(search_music, text)
+        results = await run(search_music, text)
     except Exception as ex:
         logging.exception("search error")
         await log_dl(uid, "search", "youtube", ok=False, err=short_err(ex), query=text[:200])
@@ -717,7 +758,7 @@ async def send_mp3(call: CallbackQuery, url: str, fallback: str = None, dur=None
     wait = await call.message.answer("⏳ MP3 tayyorlanmoqda...")
     tmp = tempfile.mkdtemp()
     try:
-        path, info = await asyncio.to_thread(download_audio, url, tmp, fallback, dur)
+        path, info = await run(download_audio, url, tmp, fallback, dur)
         if os.path.getsize(path) > MAX_SIZE:
             return await call.message.answer("⚠️ Fayl 50 MB dan katta.")
         sent = await call.message.answer_audio(
