@@ -27,6 +27,11 @@ from aiogram.types import (
     ReplyKeyboardMarkup, KeyboardButton,
 )
 
+try:
+    from shazamio import Shazam
+except ImportError:  # requirements.txt ga shazamio qo'shilmagan bo'lsa
+    Shazam = None
+
 logging.basicConfig(level=logging.INFO)
 
 TOKEN = os.getenv("BOT_TOKEN")
@@ -35,7 +40,7 @@ OWNERS = {int(x) for x in os.getenv("ADMIN_IDS", "").replace(" ", "").split(",")
 COOKIES = os.getenv("COOKIES_FILE")
 PROXY = os.getenv("PROXY_URL")
 MAX_SIZE = 50 * 1024 * 1024
-AUDIO_QUALITY = os.getenv("AUDIO_QUALITY", "128")  # kbps; YouTube manbasi ~128k, 192 faqat faylni kattalashtiradi
+AUDIO_QUALITY = os.getenv("AUDIO_QUALITY", "128")  # kbps
 
 bot = Bot(TOKEN)
 dp = Dispatcher(storage=MemoryStorage())
@@ -48,7 +53,6 @@ ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 SUPPORTED = ("instagram.com", "youtube.com", "youtu.be", "tiktok.com")
 SEARCHES, LINKS = {}, {}
 BG = set()
-USER_MODE = set()  # test rejimi: admin o'zini oddiy foydalanuvchidek sinaydi
 ADMIN_BTN = "⚙️ Boshqarish"
 ADMIN_KB = ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=ADMIN_BTN)]], resize_keyboard=True)
 
@@ -60,6 +64,7 @@ DEFAULTS = {
         "👋 Salom! Men <b>ASAVED BOT</b>.\n\n"
         "📥 Instagram / YouTube / TikTok <b>havolasini</b> yuboring — videoni yuklab beraman.\n"
         "🎵 <b>Qo'shiq yoki ijrochi nomini</b> yozing — 10 ta natija chiqaraman.\n"
+        "🎤 <b>Ovozli xabar</b> yoki audio yuboring — qo'shiqni topib beraman.\n"
         "⭕ <b>Video yuboring</b> — dumaloq video qilib beraman."
     ),
     "caption": "📩 @{bot} orqali yuklab olindi",
@@ -71,6 +76,7 @@ DEFAULTS = {
     "feat_video": "1",
     "feat_music": "1",
     "feat_round": "1",
+    "feat_voice": "1",
 }
 CFG = {}
 TOGGLES = {
@@ -78,6 +84,7 @@ TOGGLES = {
     "maintenance": "Texnik ishlar (maintenance)",
     "feat_video": "Video yuklash",
     "feat_music": "Musiqa qidirish",
+    "feat_voice": "Ovoz orqali topish",
     "feat_round": "Dumaloq video",
 }
 TEXTS = {
@@ -110,9 +117,6 @@ async def db_init():
         CREATE TABLE IF NOT EXISTS downloads(
             id SERIAL PRIMARY KEY, user_id BIGINT, kind TEXT,
             ts TIMESTAMPTZ DEFAULT now());
-        CREATE TABLE IF NOT EXISTS admin_log(
-            id SERIAL PRIMARY KEY, admin_id BIGINT, admin_name TEXT,
-            action TEXT, ts TIMESTAMPTZ DEFAULT now());
         ALTER TABLE users ADD COLUMN IF NOT EXISTS pro_until TIMESTAMPTZ;
         ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ DEFAULT now();
         ALTER TABLE downloads ADD COLUMN IF NOT EXISTS platform TEXT;
@@ -139,20 +143,6 @@ async def set_cfg(key, value):
 
 def is_admin(uid: int) -> bool:
     return uid in OWNERS or uid in ADMIN_SET
-
-
-def eff_admin(uid: int) -> bool:
-    return is_admin(uid) and uid not in USER_MODE
-
-
-async def alog(user, action: str):
-    try:
-        async with pool.acquire() as c:
-            await c.execute(
-                "INSERT INTO admin_log(admin_id, admin_name, action) VALUES($1,$2,$3)",
-                user.id, user.full_name, action)
-    except Exception:
-        logging.exception("alog")
 
 
 async def log_dl(uid, kind, platform=None, ok=True, err=None, query=None):
@@ -194,7 +184,7 @@ def remember(store: dict, key, value):
 
 # ====================== LIMIT / PRO ======================
 async def over_limit(uid: int) -> bool:
-    if eff_admin(uid):
+    if is_admin(uid):
         return False
     limit = int(CFG.get("daily_limit") or 0)
     if limit <= 0:
@@ -251,11 +241,7 @@ class Gate(BaseMiddleware):
                 "RETURNING banned", user.id, user.full_name, user.username)
 
         if is_admin(user.id):
-            cb = event.data if isinstance(event, CallbackQuery) else ""
-            txt = event.text if isinstance(event, Message) else None
-            if (not user.id in USER_MODE or data.get("raw_state") or cb.startswith("ad:")
-                    or txt in (ADMIN_BTN, "/admin", "/cancel")):
-                return await handler(event, data)
+            return await handler(event, data)
 
         async def deny(text):
             if isinstance(event, CallbackQuery):
@@ -341,7 +327,6 @@ def _download_audio(url: str, folder: str, yt_args=None):
         info = info["entries"][0]
     path = f"{folder}/{info['id']}.mp3"
     if not os.path.exists(path):
-        # fayl nomi boshqacha chiqsa (maxsus belgilar), papkadan mp3 ni topamiz
         found = sorted(
             (os.path.join(folder, f) for f in os.listdir(folder) if f.endswith(".mp3")),
             key=os.path.getmtime, reverse=True)
@@ -378,7 +363,6 @@ def sc_candidates(q: str, dur=None):
         d = x.get("duration")
         if not u:
             continue
-        # davomiyligi mos kelmaydigan treklarni yuklamasdan oldin o'tkazib yuboramiz
         if dur and d and abs(d - dur) > max(25, dur * 0.15):
             continue
         urls.append(u)
@@ -419,7 +403,6 @@ def download_audio(url: str, folder: str, fallback: str = None, dur=None):
         except Exception as ex:
             yt_errs.append(short_err(ex))
             logging.warning("audio urinish xato (%s): %s", args, short_err(ex))
-    # IP butunlay bloklangan bo'lsa (bot deb gumon), boshqa yuklamalar ham ishlamaydi
     blocked = any("confirm you" in s or "not a bot" in s for s in yt_errs)
     if is_yt and fallback and not blocked:
         m_id = re.search(r"(?:v=|youtu\.be/)([\w-]{11})", url)
@@ -462,7 +445,6 @@ def download_audio(url: str, folder: str, fallback: str = None, dur=None):
                 except Exception as ex:
                     sc_err = short_err(ex)
                     logging.warning("SoundCloud xato (%s): %s", u, short_err(ex))
-    # Asosiy sabab (birinchi YouTube xatosi) ko'rinib tursin
     first = yt_errs[0] if yt_errs else "noma'lum xato"
     msg = f"{'YouTube' if is_yt else 'Yuklash'}: {first[:230]}"
     if sc_err:
@@ -494,6 +476,27 @@ def make_round(src: str, dst: str):
     )
 
 
+def to_wav(src: str, dst: str):
+    """Ovozni Shazam uchun mono WAV ga o'giradi (birinchi 30 soniya)."""
+    subprocess.run(
+        ["ffmpeg", "-y", "-i", src, "-t", "30", "-vn", "-ac", "1", "-ar", "44100", dst],
+        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
+async def shazam_recognize(path: str):
+    """(title, artist) yoki None qaytaradi."""
+    if Shazam is None:
+        raise RuntimeError("shazamio o'rnatilmagan (requirements.txt ga qo'shing)")
+    sh = Shazam()
+    fn = getattr(sh, "recognize", None) or getattr(sh, "recognize_song")
+    out = await asyncio.wait_for(fn(path), timeout=45)
+    track = (out or {}).get("track")
+    if not track:
+        return None
+    return track.get("title") or "", track.get("subtitle") or ""
+
+
 # ====================== ODDIY FOYDALANUVCHI ======================
 OFF = "⛔ Bu funksiya vaqtincha o'chirilgan."
 
@@ -521,7 +524,7 @@ async def check_sub(call: CallbackQuery):
 @main.message(F.video)
 async def to_round(m: Message):
     uid = m.from_user.id
-    if CFG["feat_round"] != "1" and not eff_admin(uid):
+    if CFG["feat_round"] != "1" and not is_admin(uid):
         return await m.answer(OFF)
     if await over_limit(uid):
         return await m.answer(limit_text(), parse_mode="HTML")
@@ -544,6 +547,71 @@ async def to_round(m: Message):
         await wait.delete()
 
 
+async def send_results(m: Message, results, head: str):
+    """Qidiruv natijalarini raqamli tugmalar bilan chiqaradi."""
+    sid = uuid.uuid4().hex[:8]
+    remember(SEARCHES, sid, results)
+    lines = [head + "\n"]
+    for i, r in enumerate(results, 1):
+        lines.append(f"<b>{i}.</b> {e(r['title'])} <b>{fmt_dur(r['dur'])}</b>")
+    nums = [InlineKeyboardButton(text=str(i), callback_data=f"s:{sid}:{i-1}")
+            for i in range(1, len(results) + 1)]
+    rows = [nums[i:i + 5] for i in range(0, len(nums), 5)]
+    rows.append([InlineKeyboardButton(text="❌", callback_data="x")])
+    await m.answer("\n".join(lines), parse_mode="HTML",
+                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+
+
+@main.message(F.voice | F.audio | F.video_note)
+async def voice_handler(m: Message):
+    """Ovozli xabar / audio / dumaloq video orqali qo'shiqni aniqlash."""
+    uid = m.from_user.id
+    if CFG["feat_voice"] != "1" and not is_admin(uid):
+        return await m.answer(OFF)
+    media = m.voice or m.audio or m.video_note
+    if media.file_size and media.file_size > 20 * 1024 * 1024:
+        return await m.answer("⚠️ Fayl 20 MB dan oshmasligi kerak.")
+    wait = await m.answer("🎧 Tinglanmoqda...")
+    tmp = tempfile.mkdtemp()
+    try:
+        src, wav = f"{tmp}/in.bin", f"{tmp}/in.wav"
+        await bot.download(media, destination=src)
+        await asyncio.to_thread(to_wav, src, wav)
+        found = await shazam_recognize(wav)
+        if not found or not (found[0] or found[1]):
+            await log_dl(uid, "voice", "shazam", ok=False, err="aniqlanmadi")
+            return await m.answer(
+                "😕 Qo'shiq aniqlanmadi.\n"
+                "Musiqa aniq eshitiladigan 10–20 soniyalik ovoz yuboring "
+                "(shovqin kam bo'lsin). Xirgoyi qilib aytilgan qo'shiq aniqlanmaydi.")
+        title, artist = found
+        query = f"{artist} - {title}".strip(" -")
+        await log_dl(uid, "voice", "shazam", query=query[:200])
+        try:
+            results = await asyncio.to_thread(search_music, query)
+        except Exception as ex:
+            logging.exception("voice search error")
+            results = []
+        head = f"🎤 <b>{e(artist)} — {e(title)}</b>"
+        if not results:
+            return await m.answer(f"{head}\n\n😕 Yuklab olish uchun natija topilmadi. "
+                                  f"Nomini matn qilib yozib ko'ring.", parse_mode="HTML")
+        await send_results(m, results, head)
+    except Exception as ex:
+        logging.exception("voice error")
+        await log_dl(uid, "voice", "shazam", ok=False, err=short_err(ex))
+        msg = "❌ Qo'shiqni aniqlab bo'lmadi. Keyinroq urinib ko'ring."
+        if is_admin(uid):
+            msg += f"\n\n<code>{e(short_err(ex))}</code>"
+        await m.answer(msg, parse_mode="HTML")
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+        try:
+            await wait.delete()
+        except Exception:
+            pass
+
+
 @main.message(F.text, ~F.text.startswith("/"))
 async def text_handler(m: Message):
     uid = m.from_user.id
@@ -551,7 +619,7 @@ async def text_handler(m: Message):
     link = URL_RE.search(text)
 
     if link:
-        if CFG["feat_video"] != "1" and not eff_admin(uid):
+        if CFG["feat_video"] != "1" and not is_admin(uid):
             return await m.answer(OFF)
         url = link.group(0)
         if not any(d in url for d in SUPPORTED):
@@ -584,7 +652,7 @@ async def text_handler(m: Message):
             await wait.delete()
         return
 
-    if CFG["feat_music"] != "1" and not eff_admin(uid):
+    if CFG["feat_music"] != "1" and not is_admin(uid):
         return await m.answer(OFF)
     wait = await m.answer("🔍 Qidirilmoqda...")
     try:
@@ -597,18 +665,7 @@ async def text_handler(m: Message):
     if not results:
         return await m.answer("😕 Hech narsa topilmadi.")
     await log_dl(uid, "search", "youtube", query=text[:200])
-
-    sid = uuid.uuid4().hex[:8]
-    remember(SEARCHES, sid, results)
-    lines = [f"🔍 <i>{e(text)}</i>\n"]
-    for i, r in enumerate(results, 1):
-        lines.append(f"<b>{i}.</b> {e(r['title'])} <b>{fmt_dur(r['dur'])}</b>")
-    nums = [InlineKeyboardButton(text=str(i), callback_data=f"s:{sid}:{i-1}")
-            for i in range(1, len(results) + 1)]
-    rows = [nums[i:i + 5] for i in range(0, len(nums), 5)]
-    rows.append([InlineKeyboardButton(text="❌", callback_data="x")])
-    await m.answer("\n".join(lines), parse_mode="HTML",
-                   reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+    await send_results(m, results, f"🔍 <i>{e(text)}</i>")
 
 
 YT_ID_RE = re.compile(r"(?:v=|youtu\.be/)([\w-]{11})")
@@ -646,7 +703,6 @@ async def send_mp3(call: CallbackQuery, url: str, fallback: str = None, dur=None
     m_id = YT_ID_RE.search(url)
     vid = m_id.group(1) if m_id else None
 
-    # Oldin yuklangan qo'shiq bo'lsa — darrov file_id bilan yuboramiz
     if vid:
         fid = await cache_get(vid)
         if fid:
@@ -673,7 +729,7 @@ async def send_mp3(call: CallbackQuery, url: str, fallback: str = None, dur=None
         )
         if vid and sent.audio:
             await cache_put(vid, sent.audio.file_id)
-        src =(info.get("extractor_key") or platform_of(url)).lower()
+        src = (info.get("extractor_key") or platform_of(url)).lower()
         await log_dl(uid, "music", src, query=(fallback or info.get("title") or "")[:200])
     except Exception as ex:
         logging.exception("audio error")
@@ -719,7 +775,7 @@ async def close(call: CallbackQuery):
     await call.message.delete()
 
 
-# ====================== ADMIN PANEL ======================
+# ====================== ADMIN PANEL (10 ta funksiya) ======================
 class IsAdmin(BaseFilter):
     async def __call__(self, event) -> bool:
         return bool(event.from_user) and is_admin(event.from_user.id)
@@ -737,19 +793,14 @@ class S(StatesGroup):
     add_admin = State()
 
 
-def menu(uid: int):
+def menu():
     mt = "✅ YOQILGAN" if CFG["maintenance"] == "1" else "❌ o'chiq"
-    ts = "✅ YOQILGAN" if uid in USER_MODE else "❌ o'chiq"
     return kb([
-        [("📊 LIVE statistika", "ad:stats"), ("🔍 User qidirish", "ad:find")],
-        [("📈 Kunlik grafik", "ad:chart:7"), ("🔥 Top userlar", "ad:top")],
-        [("🎵 Musiqa statistika", "ad:mstat"), ("📥 Download log", "ad:log:all")],
-        [("💎 PRO boshqaruvi", "ad:pro"), ("🔗 Majburiy obuna", "ad:ch")],
-        [("📢 Broadcast", "ad:bc"), ("⚙️ Sozlamalar / Limit", "ad:set")],
-        [(f"🛠 Maintenance: {mt}", "ad:tg:maintenance:home")],
-        [(f"🧪 Test rejimi: {ts}", "ad:test")],
-        [("👥 Userlar ro'yxati", "ad:users"), ("📝 Admin log", "ad:alog")],
-        [("👮 Adminlar", "ad:adm")],
+        [("📊 Statistika", "ad:stats"), ("🔍 User qidirish", "ad:find")],
+        [("👥 Userlar ro'yxati", "ad:users"), ("💎 PRO boshqaruvi", "ad:pro")],
+        [("🔗 Majburiy obuna", "ad:ch"), ("📢 Broadcast", "ad:bc")],
+        [("⚙️ Sozlamalar / Limit", "ad:set"), (f"🛠 Maintenance: {mt}", "ad:tg:maintenance:home")],
+        [("📥 Download log", "ad:log:all"), ("👮 Adminlar", "ad:adm")],
     ])
 
 
@@ -769,22 +820,22 @@ async def show(call: CallbackQuery, text: str, markup):
 @admin.message(Command("admin"))
 async def admin_open(m: Message, state: FSMContext):
     await state.clear()
-    await m.answer(PANEL_TITLE, reply_markup=menu(m.from_user.id), parse_mode="HTML")
+    await m.answer(PANEL_TITLE, reply_markup=menu(), parse_mode="HTML")
 
 
 @admin.message(Command("cancel"))
 async def cancel_cmd(m: Message, state: FSMContext):
     await state.clear()
-    await m.answer("Bekor qilindi.", reply_markup=menu(m.from_user.id))
+    await m.answer("Bekor qilindi.", reply_markup=menu())
 
 
 @admin.callback_query(F.data == "ad:home")
 async def ad_home(call: CallbackQuery, state: FSMContext):
     await state.clear()
-    await show(call, PANEL_TITLE, menu(call.from_user.id))
+    await show(call, PANEL_TITLE, menu())
 
 
-# ---- 1. LIVE statistika ----
+# ---- 1. Statistika ----
 @admin.callback_query(F.data == "ad:stats")
 async def ad_stats(call: CallbackQuery):
     async with pool.acquire() as c:
@@ -807,11 +858,11 @@ async def ad_stats(call: CallbackQuery):
                    count(*) FILTER (WHERE ts > date_trunc('day', now())) AS d1
             FROM downloads WHERE ok AND kind <> 'search' GROUP BY kind""")
         nch = await c.fetchval("SELECT count(*) FROM channels")
-    names = {"video": "🎬 Video", "music": "🎵 Musiqa", "round": "⭕ Dumaloq"}
+    names = {"video": "🎬 Video", "music": "🎵 Musiqa", "round": "⭕ Dumaloq", "voice": "🎤 Ovoz orqali"}
     dl = "\n".join(f"{names.get(r['kind'], r['kind'])}: {r['total']} (bugun {r['d1']})" for r in d) or "—"
     now = datetime.now(timezone.utc)
     text = (
-        f"📊 <b>LIVE statistika</b> <i>{now:%H:%M:%S} UTC</i>\n\n"
+        f"📊 <b>Statistika</b> <i>{now:%H:%M:%S} UTC</i>\n\n"
         f"🟢 Hozir online (5 daqiqa): <b>{u['online']}</b>\n"
         f"👥 Jami userlar: <b>{u['total']}</b>  (faol {u['act']})\n"
         f"🆕 Bugun: {u['d1']}   Hafta: {u['d7']}\n"
@@ -825,63 +876,7 @@ async def ad_stats(call: CallbackQuery):
     await show(call, text, kb([[("🔄 Yangilash", "ad:stats")], BACK]))
 
 
-# ---- 7. Kunlik grafik ----
-@admin.callback_query(F.data.startswith("ad:chart:"))
-async def ad_chart(call: CallbackQuery):
-    days = int(call.data.split(":")[2])
-    async with pool.acquire() as c:
-        rows = await c.fetch("""
-            SELECT d::date AS day,
-              (SELECT count(*) FROM downloads x WHERE x.ts::date = d::date AND x.ok AND x.kind <> 'search') AS dl,
-              (SELECT count(*) FROM users u WHERE u.joined::date = d::date) AS nu,
-              (SELECT count(DISTINCT x.user_id) FROM downloads x WHERE x.ts::date = d::date) AS au
-            FROM generate_series((current_date - ($1::int - 1))::timestamp,
-                                 current_date::timestamp, interval '1 day') d
-            ORDER BY 1""", days)
-    mx = max([r["dl"] for r in rows] + [1])
-    lines = []
-    for r in rows:
-        bar = "█" * round(r["dl"] / mx * 10)
-        lines.append(f"{r['day']:%d.%m} {bar:<10} {r['dl']:>4} yuk | +{r['nu']} yangi | {r['au']} faol")
-    text = f"📈 <b>Oxirgi {days} kun</b>\n\n<pre>{e(chr(10).join(lines))}</pre>"
-    await show(call, text, kb([[("7 kun", "ad:chart:7"), ("30 kun", "ad:chart:30")], BACK]))
-
-
-# ---- 8. Top foydalanuvchilar ----
-@admin.callback_query(F.data == "ad:top")
-async def ad_top(call: CallbackQuery):
-    async with pool.acquire() as c:
-        rows = await c.fetch("""
-            SELECT u.id, u.name, u.username, count(*) AS n
-            FROM downloads d JOIN users u ON u.id = d.user_id
-            WHERE d.ok AND d.kind IN ('video','music','round')
-            GROUP BY u.id, u.name, u.username ORDER BY n DESC LIMIT 10""")
-    text = "🔥 <b>Top foydalanuvchilar</b>\n\n"
-    text += "\n".join(
-        f"{i}. {e(r['name'])} {'@' + e(r['username']) if r['username'] else ''} — <b>{r['n']}</b> "
-        f"(<code>{r['id']}</code>)" for i, r in enumerate(rows, 1)) or "Hali ma'lumot yo'q."
-    btns = [[(f"{i}. {r['name'][:25]}", f"ad:u:{r['id']}")] for i, r in enumerate(rows[:5], 1)]
-    await show(call, text, kb(btns + [BACK]))
-
-
-# ---- 9. Musiqa statistika ----
-@admin.callback_query(F.data == "ad:mstat")
-async def ad_mstat(call: CallbackQuery):
-    async with pool.acquire() as c:
-        songs = await c.fetch("""
-            SELECT query, count(*) AS n FROM downloads
-            WHERE kind='music' AND ok AND query <> '' GROUP BY query ORDER BY n DESC LIMIT 10""")
-        qs = await c.fetch("""
-            SELECT lower(query) AS q, count(*) AS n FROM downloads
-            WHERE kind='search' AND ok AND query <> '' GROUP BY 1 ORDER BY n DESC LIMIT 10""")
-    text = "🎵 <b>Eng ko'p yuklangan qo'shiqlar</b>\n"
-    text += "\n".join(f"{i}. {e(r['query'])} — {r['n']}" for i, r in enumerate(songs, 1)) or "—"
-    text += "\n\n🔍 <b>Eng ko'p qidirilgan so'zlar</b>\n"
-    text += "\n".join(f"{i}. {e(r['q'])} — {r['n']}" for i, r in enumerate(qs, 1)) or "—"
-    await show(call, text, kb([BACK]))
-
-
-# ---- 10. Download log ----
+# ---- 9. Download log ----
 @admin.callback_query(F.data.startswith("ad:log:"))
 async def ad_log(call: CallbackQuery):
     only_err = call.data.split(":")[2] == "err"
@@ -898,16 +893,17 @@ async def ad_log(call: CallbackQuery):
         lines.append(line)
     text = f"📥 <b>Download log</b> ({'faqat xatolar' if only_err else 'hammasi'})\n\n"
     text += "\n".join(lines) or "Bo'sh."
-    await show(call, text, kb([[("Hammasi", "ad:log:all"), ("Faqat xatolar", "ad:log:err")], BACK]))
+    await show(call, text, kb([[("Hammasi", "ad:log:all"), ("Faqat xatolar", "ad:log:err")],
+                               [("🔄 Yangilash", f"ad:log:{'err' if only_err else 'all'}")], BACK]))
 
 
-# ---- foydalanuvchi kartasi / qidirish / ban / PRO ----
+# ---- 2. Foydalanuvchi kartasi / qidirish / ban / PRO ----
 async def user_card(uid: int):
     async with pool.acquire() as c:
         r = await c.fetchrow("SELECT * FROM users WHERE id=$1", uid)
         cnt = await c.fetch(
             "SELECT kind, count(*) AS n FROM downloads WHERE user_id=$1 AND ok "
-            "AND kind IN ('video','music','round') GROUP BY kind", uid)
+            "AND kind IN ('video','music','round','voice') GROUP BY kind", uid)
     if not r:
         return None
     k = {x["kind"]: x["n"] for x in cnt}
@@ -919,7 +915,8 @@ async def user_card(uid: int):
         f"Username: {'@' + e(r['username']) if r['username'] else '—'}\n"
         f"Qo'shilgan: {r['joined']:%Y-%m-%d %H:%M}\n"
         f"Oxirgi faollik: {r['last_seen']:%Y-%m-%d %H:%M}\n"
-        f"🎬 Video: {k.get('video', 0)}   🎵 Musiqa: {k.get('music', 0)}   ⭕ Dumaloq: {k.get('round', 0)}\n"
+        f"🎬 Video: {k.get('video', 0)}   🎵 Musiqa: {k.get('music', 0)}   "
+        f"⭕ Dumaloq: {k.get('round', 0)}   🎤 Ovoz: {k.get('voice', 0)}\n"
         f"Holat: {'🚫 bloklangan' if r['banned'] else '✅ faol'}\n"
         f"💎 PRO: {('✅ ' + r['pro_until'].strftime('%Y-%m-%d') + ' gacha') if pro else '—'}"
     )
@@ -976,10 +973,10 @@ async def ad_ban(call: CallbackQuery):
         return await call.answer("Adminni bloklab bo'lmaydi.", show_alert=True)
     async with pool.acquire() as c:
         await c.execute("UPDATE users SET banned=$2 WHERE id=$1", uid, act == "ban")
-    await alog(call.from_user, f"{act.upper()} user {uid}")
     await show(call, *(await user_card(uid)))
 
 
+# ---- 4. PRO boshqaruvi ----
 @admin.callback_query(F.data.startswith("ad:pro:") & (F.data != "ad:pro"))
 async def ad_pro_set(call: CallbackQuery):
     _, _, uid, days = call.data.split(":")
@@ -991,7 +988,6 @@ async def ad_pro_set(call: CallbackQuery):
             await c.execute(
                 "UPDATE users SET pro_until = GREATEST(now(), COALESCE(pro_until, now())) "
                 "+ make_interval(days => $2) WHERE id=$1", uid, days)
-    await alog(call.from_user, f"PRO {'bekor' if days == 0 else '+' + str(days) + ' kun'} user {uid}")
     try:
         if days:
             await bot.send_message(uid, f"💎 Sizga PRO berildi (+{days} kun). Cheksiz foydalaning!")
@@ -1005,12 +1001,13 @@ async def ad_pro(call: CallbackQuery):
     async with pool.acquire() as c:
         rows = await c.fetch(
             "SELECT id, name, pro_until FROM users WHERE pro_until > now() ORDER BY pro_until LIMIT 15")
-    text = f"💎 <b>PRO foydalanuvchilar</b>\n\nFaol PRO: {len(rows)}\n\nYangi PRO berish: «🔍 User qidirish» → userni toping → 💎 tugmalari."
+    text = (f"💎 <b>PRO foydalanuvchilar</b>\n\nFaol PRO: {len(rows)}\n\n"
+            "Yangi PRO berish: «🔍 User topib PRO berish» → userni toping → 💎 tugmalari.")
     btns = [[(f"💎 {r['name'][:22]} — {r['pro_until']:%d.%m}", f"ad:u:{r['id']}")] for r in rows]
     await show(call, text, kb(btns + [[("🔍 User topib PRO berish", "ad:find")], BACK]))
 
 
-# ---- userlar ro'yxati ----
+# ---- 3. Userlar ro'yxati ----
 @admin.callback_query(F.data == "ad:users")
 async def ad_users(call: CallbackQuery, state: FSMContext):
     await state.clear()
@@ -1037,7 +1034,7 @@ async def ad_export(call: CallbackQuery):
     await call.answer()
 
 
-# ---- 13. Majburiy obuna ----
+# ---- 5. Majburiy obuna ----
 async def channels_view(call: CallbackQuery):
     async with pool.acquire() as c:
         chans = await c.fetch("SELECT chat_id, title FROM channels ORDER BY title")
@@ -1045,8 +1042,7 @@ async def channels_view(call: CallbackQuery):
     state_txt = "✅ yoqilgan" if on else "❌ o'chirilgan"
     text = f"🔗 <b>Majburiy obuna</b>\nTekshiruv: {state_txt}\n\n"
     text += "\n".join(f"• {e(ch['title'])}" for ch in chans) or "Hali kanal qo'shilmagan."
-    text += ("\n\n💡 Admin hisobingiz tekshiruvdan o'tkazib yuboriladi. "
-             "Sinash uchun menyudan «🧪 Test rejimi» ni yoqing yoki boshqa akkauntdan kiring.")
+    text += "\n\n💡 Admin hisobingiz tekshiruvdan o'tkazib yuboriladi. Sinash uchun boshqa akkauntdan kiring."
     rows = [[(f"🗑 {ch['title'][:30]}", f"ad:chdel:{ch['chat_id']}")] for ch in chans]
     rows.append([("➕ Kanal qo'shish", "ad:chadd")])
     rows.append([("🔁 Obunani yoqish/o'chirish", "ad:tg:sub_enabled:ch")])
@@ -1063,9 +1059,7 @@ async def ad_ch(call: CallbackQuery):
 async def ad_chdel(call: CallbackQuery):
     cid = int(call.data.split(":")[2])
     async with pool.acquire() as c:
-        title = await c.fetchval("SELECT title FROM channels WHERE chat_id=$1", cid)
         await c.execute("DELETE FROM channels WHERE chat_id=$1", cid)
-    await alog(call.from_user, f"Kanal o'chirildi: {title}")
     await channels_view(call)
 
 
@@ -1110,12 +1104,10 @@ async def add_channel(m: Message, state: FSMContext):
             "ON CONFLICT(chat_id) DO UPDATE SET title=$2, link=$3",
             chat.id, chat.title or str(chat.id), link)
     await state.clear()
-    await alog(m.from_user, f"Kanal qo'shildi: {chat.title}")
-    await m.answer(f"✅ Qo'shildi: <b>{e(chat.title)}</b>", parse_mode="HTML",
-                   reply_markup=menu(m.from_user.id))
+    await m.answer(f"✅ Qo'shildi: <b>{e(chat.title)}</b>", parse_mode="HTML", reply_markup=menu())
 
 
-# ---- 5. Broadcast ----
+# ---- 6. Broadcast ----
 @admin.callback_query(F.data == "ad:bc")
 async def ad_bc(call: CallbackQuery, state: FSMContext):
     await state.set_state(S.broadcast)
@@ -1165,14 +1157,13 @@ async def bc_go(call: CallbackQuery, state: FSMContext):
     await state.clear()
     if "mid" not in data:
         return await call.answer("Xabar topilmadi.", show_alert=True)
-    await alog(call.from_user, "Broadcast yubordi")
     t = asyncio.create_task(do_broadcast(call.from_user.id, data["cid"], data["mid"]))
     BG.add(t)
     t.add_done_callback(BG.discard)
     await show(call, "⏳ Yuborish boshlandi. Tugagach xabar beraman.", kb([BACK]))
 
 
-# ---- 12/14/6. Sozlamalar, limit, maintenance, test rejimi ----
+# ---- 7/8. Sozlamalar, limit, maintenance ----
 async def settings_view(call: CallbackQuery):
     rows = [[(f"{'✅' if CFG[k] == '1' else '❌'} {label}", f"ad:tg:{k}:set")]
             for k, label in TOGGLES.items()]
@@ -1194,29 +1185,12 @@ async def ad_toggle(call: CallbackQuery):
     if key not in TOGGLES:
         return await call.answer()
     await set_cfg(key, "0" if CFG[key] == "1" else "1")
-    await alog(call.from_user, f"{TOGGLES[key]}: {'yoqildi' if CFG[key] == '1' else 'o`chirildi'}")
     if back == "ch":
         await channels_view(call)
     elif back == "home":
-        await show(call, PANEL_TITLE, menu(call.from_user.id))
+        await show(call, PANEL_TITLE, menu())
     else:
         await settings_view(call)
-
-
-@admin.callback_query(F.data == "ad:test")
-async def ad_test(call: CallbackQuery):
-    uid = call.from_user.id
-    if uid in USER_MODE:
-        USER_MODE.discard(uid)
-        note = "🧪 Test rejimi o'chirildi — yana adminsiz."
-    else:
-        USER_MODE.add(uid)
-        note = ("🧪 Test rejimi YOQILDI: endi bot sizga oddiy foydalanuvchidek ishlaydi "
-                "(obuna, limit, maintenance, o'chirilgan funksiyalar). "
-                "Panel tugmasi ishlayveradi. Tugatish uchun shu tugmani yana bosing.")
-    await alog(call.from_user, "Test rejimi o'zgartirildi")
-    await call.message.answer(note)
-    await show(call, PANEL_TITLE, menu(uid))
 
 
 @admin.callback_query(F.data.startswith("ad:tx:"))
@@ -1244,22 +1218,10 @@ async def tx_save(m: Message, state: FSMContext):
     else:
         await set_cfg(key, m.html_text)
     await state.clear()
-    await alog(m.from_user, f"O'zgartirdi: {key}")
-    await m.answer("✅ Saqlandi.", reply_markup=menu(m.from_user.id))
+    await m.answer("✅ Saqlandi.", reply_markup=menu())
 
 
-# ---- 15. Admin activity log ----
-@admin.callback_query(F.data == "ad:alog")
-async def ad_alog(call: CallbackQuery):
-    async with pool.acquire() as c:
-        rows = await c.fetch("SELECT * FROM admin_log ORDER BY ts DESC LIMIT 20")
-    text = "📝 <b>Admin Activity Log</b>\n\n"
-    text += "\n".join(f"{r['ts']:%d.%m %H:%M} — <b>{e(r['admin_name'])}</b>: {e(r['action'])}"
-                      for r in rows) or "Hali amal yo'q."
-    await show(call, text, kb([BACK]))
-
-
-# ---- adminlar ----
+# ---- 10. Adminlar ----
 async def admins_view(call: CallbackQuery):
     text = "👮 <b>Adminlar</b>\n\n"
     text += "\n".join(f"• <code>{i}</code> (asosiy)" for i in sorted(OWNERS))
@@ -1297,9 +1259,8 @@ async def add_admin(m: Message, state: FSMContext):
         await c.execute("INSERT INTO admins(id) VALUES($1) ON CONFLICT DO NOTHING", uid)
     ADMIN_SET.add(uid)
     await state.clear()
-    await alog(m.from_user, f"Admin qo'shildi: {uid}")
     await m.answer(f"✅ Admin qo'shildi: <code>{uid}</code>\nU botga /start yozsa, «{ADMIN_BTN}» tugmasi chiqadi.",
-                   parse_mode="HTML", reply_markup=menu(m.from_user.id))
+                   parse_mode="HTML", reply_markup=menu())
 
 
 @admin.callback_query(F.data.startswith("ad:admdel:"))
@@ -1310,7 +1271,6 @@ async def ad_admdel(call: CallbackQuery):
     async with pool.acquire() as c:
         await c.execute("DELETE FROM admins WHERE id=$1", uid)
     ADMIN_SET.discard(uid)
-    await alog(call.from_user, f"Admin o'chirildi: {uid}")
     await admins_view(call)
 
 
@@ -1325,6 +1285,8 @@ async def main_run():
         raise SystemExit("DATABASE_URL kiritilmagan!")
     if not OWNERS:
         logging.warning("ADMIN_IDS bo'sh — admin panel hech kimga ochilmaydi!")
+    if Shazam is None:
+        logging.warning("shazamio o'rnatilmagan — ovoz orqali topish ishlamaydi!")
     await db_init()
     BOT_USERNAME = (await bot.get_me()).username
 
