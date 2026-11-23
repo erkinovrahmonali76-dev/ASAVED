@@ -325,6 +325,52 @@ BTN = {
 BTN_REV = {t: k for k, d in BTN.items() for t in d.values()}
 
 
+STR["uz"].update({
+    "buy_method": "💳 To'lov usulini tanlang:",
+    "m_auto": "💳 Click / Payme (avtomatik)",
+    "m_card": "🏦 Kartaga o'tkazish (chek bilan)",
+    "pay_card": "🏦 <b>Kartaga to'lov</b>\n\nTarif: <b>{days} kun PRO</b>\nSumma: <b>{price} so'm</b>\n\n{cards}\n\n"
+                "1️⃣ Yuqoridagi kartaga aynan <b>{price} so'm</b> o'tkazing.\n"
+                "2️⃣ To'lov <b>chekini</b> (skrinshot yoki rasm) shu yerga yuboring.\n"
+                "3️⃣ Admin tasdiqlagach, PRO avtomatik yoqiladi.\n\nBekor qilish: /cancel",
+    "chek_sent": "✅ Chek qabul qilindi. Admin tekshirib, tez orada PRO yoqadi.",
+    "chek_need": "📸 Iltimos, to'lov chekini rasm (yoki fayl) qilib yuboring.\nBekor qilish: /cancel",
+    "chek_limit": "⚠️ Sizda tekshirilmagan cheklar ko'p. Admin javobini kuting.",
+    "chek_ok": "✅ To'lov tasdiqlandi! PRO +{days} kun yoqildi.",
+    "chek_no": "❌ To'lov cheki rad etildi. Xato bo'lsa, qaytadan /buy qiling yoki admin bilan bog'laning.",
+    "cancelled": "Bekor qilindi.",
+})
+STR["ru"].update({
+    "buy_method": "💳 Выберите способ оплаты:",
+    "m_auto": "💳 Click / Payme (автоматически)",
+    "m_card": "🏦 Перевод на карту (с чеком)",
+    "pay_card": "🏦 <b>Оплата на карту</b>\n\nТариф: <b>PRO {days} дн.</b>\nСумма: <b>{price} сум</b>\n\n{cards}\n\n"
+                "1️⃣ Переведите ровно <b>{price} сум</b> на карту выше.\n"
+                "2️⃣ Отправьте сюда <b>чек</b> (скриншот или фото).\n"
+                "3️⃣ После подтверждения админом PRO включится автоматически.\n\nОтмена: /cancel",
+    "chek_sent": "✅ Чек принят. Админ проверит и скоро включит PRO.",
+    "chek_need": "📸 Пожалуйста, отправьте чек картинкой (или файлом).\nОтмена: /cancel",
+    "chek_limit": "⚠️ У вас много непроверенных чеков. Дождитесь ответа админа.",
+    "chek_ok": "✅ Оплата подтверждена! PRO +{days} дн. включён.",
+    "chek_no": "❌ Чек отклонён. Если это ошибка, повторите /buy или свяжитесь с админом.",
+    "cancelled": "Отменено.",
+})
+STR["en"].update({
+    "buy_method": "💳 Choose a payment method:",
+    "m_auto": "💳 Click / Payme (automatic)",
+    "m_card": "🏦 Card transfer (with receipt)",
+    "pay_card": "🏦 <b>Pay by card</b>\n\nPlan: <b>PRO {days} days</b>\nAmount: <b>{price} UZS</b>\n\n{cards}\n\n"
+                "1️⃣ Transfer exactly <b>{price} UZS</b> to the card above.\n"
+                "2️⃣ Send the <b>receipt</b> (screenshot or photo) here.\n"
+                "3️⃣ PRO is activated automatically once the admin confirms.\n\nCancel: /cancel",
+    "chek_sent": "✅ Receipt received. The admin will check it and activate PRO soon.",
+    "chek_need": "📸 Please send the receipt as a photo (or file).\nCancel: /cancel",
+    "chek_limit": "⚠️ You have many unchecked receipts. Please wait for the admin.",
+    "chek_ok": "✅ Payment confirmed! PRO +{days} days activated.",
+    "chek_no": "❌ Receipt rejected. If this is a mistake, try /buy again or contact the admin.",
+    "cancelled": "Cancelled.",
+})
+
 ERR_KEYS = {"not_recognized", "recog_fail", "mp3_fail", "video_fail", "nothing", "round_fail", "recog_nores"}
 
 
@@ -444,6 +490,14 @@ async def db_init():
         CREATE TABLE IF NOT EXISTS scheduled(
             id SERIAL PRIMARY KEY, run_at TIMESTAMPTZ, admin_id BIGINT,
             chat_id BIGINT, msg_id BIGINT, done BOOLEAN DEFAULT FALSE);
+        CREATE TABLE IF NOT EXISTS pay_cards(
+            id SERIAL PRIMARY KEY, title TEXT, number TEXT, holder TEXT,
+            active BOOLEAN DEFAULT TRUE);
+        CREATE TABLE IF NOT EXISTS pay_plans(days INT PRIMARY KEY, price BIGINT);
+        CREATE TABLE IF NOT EXISTS pay_requests(
+            id SERIAL PRIMARY KEY, user_id BIGINT, days INT, price BIGINT, card_id INT,
+            file_id TEXT, is_photo BOOLEAN DEFAULT TRUE, status TEXT DEFAULT 'pending',
+            ts TIMESTAMPTZ DEFAULT now(), admin_id BIGINT, decided TIMESTAMPTZ);
         CREATE INDEX IF NOT EXISTS downloads_user_ts ON downloads(user_id, ts);
         CREATE INDEX IF NOT EXISTS users_referrer ON users(referrer);
         """)
@@ -1174,25 +1228,49 @@ async def set_lang(call: CallbackQuery):
                               reply_markup=user_kb(call.from_user.id, code))
 
 
+class Receipt(StatesGroup):
+    wait = State()
+
+
+def money(n) -> str:
+    return f"{int(n):,}".replace(",", " ")
+
+
+def fmt_card(num: str) -> str:
+    d = re.sub(r"\D", "", num or "")
+    return " ".join(d[i:i + 4] for i in range(0, len(d), 4))
+
+
+async def get_plans() -> dict:
+    """Tariflar: avval bazadagi (admin panel), bo'lmasa PRO_PLANS env."""
+    try:
+        async with pool.acquire() as c:
+            rows = await c.fetch("SELECT days, price FROM pay_plans ORDER BY days")
+        if rows:
+            return {r["days"]: r["price"] for r in rows}
+    except Exception:
+        logging.exception("get_plans")
+    return dict(PRO_PLANS)
+
+
+async def get_cards():
+    async with pool.acquire() as c:
+        return await c.fetch("SELECT id, title, number, holder FROM pay_cards WHERE active ORDER BY id")
+
+
 async def show_buy(m: Message, lang: str):
-    if not (PAY_TOKEN and PRO_PLANS):
+    plans = await get_plans()
+    cards = await get_cards()
+    if not plans or not (PAY_TOKEN or cards):
         return await m.answer(tr(lang, "buy_none", pro=pro_text(lang)), parse_mode="HTML")
-    rows = [[(tr(lang, "price_fmt", days=d, price=f"{p:,}".replace(",", " ")), f"buy:{d}")]
-            for d, p in sorted(PRO_PLANS.items())]
+    rows = [[(tr(lang, "price_fmt", days=d, price=money(p)), f"buy:{d}")]
+            for d, p in sorted(plans.items())]
     await m.answer(tr(lang, "buy_pick"), parse_mode="HTML", reply_markup=kb(rows))
 
 
-@main.callback_query(F.data.startswith("buy:"))
-async def buy_cb(call: CallbackQuery, lang: str = "uz"):
-    try:
-        days = int(call.data.split(":")[1])
-    except ValueError:
-        return await call.answer()
-    price = PRO_PLANS.get(days)
-    if not PAY_TOKEN or not price:
-        return await call.answer(tr(lang, "off"), show_alert=True)
+async def send_invoice_for(uid: int, lang: str, days: int, price: int):
     await bot.send_invoice(
-        call.from_user.id,
+        uid,
         title=tr(lang, "buy_title", days=days),
         description=tr(lang, "buy_desc", days=days),
         payload=f"pro:{days}",
@@ -1200,7 +1278,108 @@ async def buy_cb(call: CallbackQuery, lang: str = "uz"):
         currency=PAY_CURRENCY,
         prices=[LabeledPrice(label=f"PRO {days}", amount=price * 100)],  # eng kichik birlikda (tiyin)
     )
+
+
+async def start_manual(msg: Message, state: FSMContext, lang: str, days: int, price: int):
+    cards = await get_cards()
+    if not cards:
+        return await msg.answer(tr(lang, "off"))
+    lines = []
+    for c in cards:
+        t = f"💳 <code>{e(fmt_card(c['number']))}</code>\n👤 {e(c['holder'])}"
+        if c["title"]:
+            t += f" ({e(c['title'])})"
+        lines.append(t)
+    await state.set_state(Receipt.wait)
+    await state.update_data(days=days, price=int(price), card_id=cards[0]["id"])
+    await msg.answer(tr(lang, "pay_card", days=days, price=money(price), cards="\n\n".join(lines)),
+                     parse_mode="HTML")
+
+
+@main.callback_query(F.data.startswith("buy:"))
+async def buy_cb(call: CallbackQuery, state: FSMContext, lang: str = "uz"):
+    try:
+        days = int(call.data.split(":")[1])
+    except ValueError:
+        return await call.answer()
+    price = (await get_plans()).get(days)
+    cards = await get_cards()
+    if not price or not (PAY_TOKEN or cards):
+        return await call.answer(tr(lang, "off"), show_alert=True)
     await call.answer()
+    if PAY_TOKEN and cards:
+        return await call.message.answer(tr(lang, "buy_method"), reply_markup=kb([
+            [(tr(lang, "m_auto"), f"bi:{days}")],
+            [(tr(lang, "m_card"), f"bm:{days}")],
+        ]))
+    if PAY_TOKEN:
+        await send_invoice_for(call.from_user.id, lang, days, price)
+    else:
+        await start_manual(call.message, state, lang, days, price)
+
+
+@main.callback_query(F.data.startswith("bi:") | F.data.startswith("bm:"))
+async def buy_method(call: CallbackQuery, state: FSMContext, lang: str = "uz"):
+    kind, d = call.data.split(":")
+    days = int(d)
+    price = (await get_plans()).get(days)
+    if not price:
+        return await call.answer(tr(lang, "off"), show_alert=True)
+    await call.answer()
+    if kind == "bi" and PAY_TOKEN:
+        await send_invoice_for(call.from_user.id, lang, days, price)
+    else:
+        await start_manual(call.message, state, lang, days, price)
+
+
+@main.message(Command("cancel"))
+async def user_cancel(m: Message, state: FSMContext, lang: str = "uz"):
+    await state.clear()
+    await m.answer(tr(lang, "cancelled"), reply_markup=user_kb(m.from_user.id, lang))
+
+
+async def send_receipt_to_admins(rid, uid, name, username, days, price, file_id, is_photo):
+    caption = (f"🧾 Yangi chek #{rid}\n👤 {name or '?'}" + (f" @{username}" if username else "") +
+               f" ({uid})\n💎 {days} kun — {money(price)} so'm")
+    markup = kb([[("✅ Tasdiqlash", f"pr:ok:{rid}"), ("❌ Rad etish", f"pr:no:{rid}")]])
+    for aid in (OWNERS | ADMIN_SET):
+        try:
+            if is_photo:
+                await bot.send_photo(aid, file_id, caption=caption, reply_markup=markup)
+            else:
+                await bot.send_document(aid, file_id, caption=caption, reply_markup=markup)
+        except Exception:
+            logging.warning("chek adminga yuborilmadi: %s", aid)
+
+
+@main.message(Receipt.wait, F.photo | F.document)
+async def got_receipt(m: Message, state: FSMContext, lang: str = "uz"):
+    data = await state.get_data()
+    days, price = data.get("days"), data.get("price")
+    if not days or not price:
+        await state.clear()
+        return
+    uid = m.from_user.id
+    is_photo = bool(m.photo)
+    file_id = m.photo[-1].file_id if is_photo else m.document.file_id
+    async with pool.acquire() as c:
+        pend = await c.fetchval(
+            "SELECT count(*) FROM pay_requests WHERE user_id=$1 AND status='pending'", uid)
+        if pend >= 3:
+            return await m.answer(tr(lang, "chek_limit"))
+        rid = await c.fetchval(
+            "INSERT INTO pay_requests(user_id, days, price, card_id, file_id, is_photo) "
+            "VALUES($1,$2,$3,$4,$5,$6) RETURNING id",
+            uid, days, price, data.get("card_id"), file_id, is_photo)
+    await state.clear()
+    await m.answer(tr(lang, "chek_sent"), reply_markup=user_kb(uid, lang))
+    await send_receipt_to_admins(rid, uid, m.from_user.full_name, m.from_user.username,
+                                 days, price, file_id, is_photo)
+
+
+@main.message(Receipt.wait, F.text, ~F.text.startswith("/"))
+async def receipt_text(m: Message, lang: str = "uz"):
+    await m.answer(tr(lang, "chek_need"))
 
 
 @main.pre_checkout_query()
@@ -1692,6 +1871,8 @@ class S(StatesGroup):
     cookies = State()
     promo = State()
     dm = State()
+    card = State()
+    plan = State()
 
 
 def menu():
@@ -1767,12 +1948,23 @@ async def ad_ms(call: CallbackQuery):
 
 @admin.callback_query(F.data == "ad:pm")
 async def ad_pm(call: CallbackQuery):
-    pay = "✅ ulangan" if (PAY_TOKEN and PRO_PLANS) else "❌ ulanmagan (PAY_PROVIDER_TOKEN, PRO_PLANS)"
-    await show(call, f"💎 <b>PRO / Promo / To'lov</b>\nTo'lov tizimi: {pay}", kb([
-        [("💎 PRO userlar", "ad:pro"), ("🎟 Promo-kodlar", "ad:promo")],
-        [("💰 To'lovlar", "ad:rev")],
-        BACK,
-    ]))
+    async with pool.acquire() as c:
+        ncards = await c.fetchval("SELECT count(*) FROM pay_cards WHERE active")
+        npend = await c.fetchval("SELECT count(*) FROM pay_requests WHERE status='pending'")
+    plans = await get_plans()
+    auto = "✅ ulangan" if PAY_TOKEN else "❌ ulanmagan (PAY_PROVIDER_TOKEN)"
+    await show(call,
+               f"💎 <b>PRO / Promo / To'lov</b>\n\n"
+               f"Click/Payme: {auto}\n"
+               f"Kartalar: {ncards} ta faol\n"
+               f"Tariflar: {len(plans)} ta\n"
+               f"Tekshirilmagan cheklar: {npend} ta",
+               kb([
+                   [("💎 PRO userlar", "ad:pro"), ("🎟 Promo-kodlar", "ad:promo")],
+                   [("💳 Kartalar", "ad:cards"), ("📦 Tariflar", "ad:plans")],
+                   [(f"🧾 Cheklar ({npend})", "ad:reqs"), ("💰 To'lovlar", "ad:rev")],
+                   BACK,
+               ]))
 
 
 @admin.callback_query(F.data == "ad:sys")
@@ -2300,6 +2492,174 @@ async def ad_rev(call: CallbackQuery):
     await show(call, text, kb([BACK]))
 
 
+# ---- Kartalar ----
+@admin.callback_query(F.data == "ad:cards")
+async def ad_cards(call: CallbackQuery):
+    async with pool.acquire() as c:
+        rows = await c.fetch("SELECT id, title, number, holder, active FROM pay_cards ORDER BY id")
+    text = "💳 <b>To'lov kartalari</b>\n\n"
+    text += "\n".join(
+        f"{'🟢' if r['active'] else '⚪️'} #{r['id']} <code>{e(fmt_card(r['number']))}</code> — "
+        f"{e(r['holder'])}" + (f" ({e(r['title'])})" if r['title'] else "")
+        for r in rows) or "Hali karta yo'q."
+    text += "\n\n🟢 — foydalanuvchilarga ko'rinadi, ⚪️ — yashirin."
+    btns = []
+    for r in rows:
+        btns.append([(("⏸ O'chirib qo'yish" if r["active"] else "▶️ Yoqish") + f" #{r['id']}", f"ad:cardtg:{r['id']}"),
+                     (f"🗑 #{r['id']}", f"ad:carddel:{r['id']}")])
+    await show(call, text, kb(btns + [[("➕ Karta qo'shish", "ad:cardadd")], [("⬅️ Orqaga", "ad:pm")]]))
+
+
+@admin.callback_query(F.data.startswith("ad:cardtg:"))
+async def ad_cardtg(call: CallbackQuery):
+    async with pool.acquire() as c:
+        await c.execute("UPDATE pay_cards SET active = NOT active WHERE id=$1", int(call.data.split(":")[2]))
+    await ad_cards(call)
+
+
+@admin.callback_query(F.data.startswith("ad:carddel:"))
+async def ad_carddel(call: CallbackQuery):
+    async with pool.acquire() as c:
+        await c.execute("DELETE FROM pay_cards WHERE id=$1", int(call.data.split(":")[2]))
+    await ad_cards(call)
+
+
+@admin.callback_query(F.data == "ad:cardadd")
+async def ad_cardadd(call: CallbackQuery, state: FSMContext):
+    await state.set_state(S.card)
+    await call.message.answer(
+        "💳 Yangi karta: <code>RAQAM | Egasining ismi | Bank (ixtiyoriy)</code>\n\n"
+        "Masalan:\n<code>8600 1234 5678 9012 | Ali Valiyev | Uzcard</code>\n\n/cancel — bekor.",
+        parse_mode="HTML")
+    await call.answer()
+
+
+@admin.message(S.card, F.text)
+async def card_create(m: Message, state: FSMContext):
+    parts = [p.strip() for p in m.text.split("|")]
+    num = re.sub(r"\D", "", parts[0])
+    if len(num) < 12 or len(num) > 19 or len(parts) < 2 or not parts[1]:
+        return await m.answer("❌ Format: RAQAM | Ism | Bank\nMasalan: 8600 1234 5678 9012 | Ali Valiyev | Uzcard")
+    async with pool.acquire() as c:
+        await c.execute("INSERT INTO pay_cards(title, number, holder) VALUES($1,$2,$3)",
+                        parts[2] if len(parts) > 2 else "", num, parts[1])
+    await state.clear()
+    await m.answer(f"✅ Karta qo'shildi: <code>{fmt_card(num)}</code>", parse_mode="HTML", reply_markup=menu())
+
+
+# ---- Tariflar ----
+@admin.callback_query(F.data == "ad:plans")
+async def ad_plans(call: CallbackQuery):
+    async with pool.acquire() as c:
+        rows = await c.fetch("SELECT days, price FROM pay_plans ORDER BY days")
+    if rows:
+        text = "📦 <b>PRO tariflari</b>\n\n" + "\n".join(f"• {r['days']} kun — {money(r['price'])} so'm" for r in rows)
+    else:
+        env = "\n".join(f"• {d} kun — {money(p)} so'm" for d, p in sorted(PRO_PLANS.items()))
+        text = ("📦 <b>PRO tariflari</b>\n\nBazada tarif yo'q." +
+                (f" Hozir PRO_PLANS dan olinmoqda:\n{env}" if env else " Tarif qo'shing."))
+    btns = [[(f"🗑 {r['days']} kun", f"ad:plandel:{r['days']}")] for r in rows]
+    await show(call, text, kb(btns + [[("➕ Tarif qo'shish", "ad:planadd")], [("⬅️ Orqaga", "ad:pm")]]))
+
+
+@admin.callback_query(F.data.startswith("ad:plandel:"))
+async def ad_plandel(call: CallbackQuery):
+    async with pool.acquire() as c:
+        await c.execute("DELETE FROM pay_plans WHERE days=$1", int(call.data.split(":")[2]))
+    await ad_plans(call)
+
+
+@admin.callback_query(F.data == "ad:planadd")
+async def ad_planadd(call: CallbackQuery, state: FSMContext):
+    await state.set_state(S.plan)
+    await call.message.answer(
+        "📦 Yangi tarif: <code>KUN NARX</code> (so'mda)\n\nMasalan: <code>30 15000</code>\n"
+        "Bir xil kun qayta yozilsa, narxi yangilanadi.\n/cancel — bekor.", parse_mode="HTML")
+    await call.answer()
+
+
+@admin.message(S.plan, F.text)
+async def plan_create(m: Message, state: FSMContext):
+    parts = m.text.replace(",", "").split()
+    if len(parts) != 2 or not all(p.isdigit() for p in parts) or int(parts[0]) < 1 or int(parts[1]) < 1:
+        return await m.answer("❌ Format: KUN NARX  (masalan: 30 15000)")
+    async with pool.acquire() as c:
+        await c.execute("INSERT INTO pay_plans(days, price) VALUES($1,$2) "
+                        "ON CONFLICT(days) DO UPDATE SET price=$2", int(parts[0]), int(parts[1]))
+    await state.clear()
+    await m.answer(f"✅ Tarif saqlandi: {parts[0]} kun — {money(parts[1])} so'm", reply_markup=menu())
+
+
+# ---- Cheklar ----
+@admin.callback_query(F.data == "ad:reqs")
+async def ad_reqs(call: CallbackQuery):
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "SELECT r.id, r.days, r.price, r.ts, u.name, u.username FROM pay_requests r "
+            "LEFT JOIN users u ON u.id = r.user_id WHERE r.status='pending' ORDER BY r.id DESC LIMIT 15")
+    text = "🧾 <b>Tekshirilmagan cheklar</b>\n\n"
+    text += "\n".join(f"#{r['id']} {lt(r['ts'])} — {ulabel(r['name'], r['username'])}: "
+                      f"{r['days']} kun, {money(r['price'])} so'm" for r in rows) or "Yo'q ✅"
+    btns = [[(f"👁 #{r['id']} — {ulabel_btn(r['name'], r['username'], 16)}", f"pr:view:{r['id']}")] for r in rows]
+    await show(call, text, kb(btns + [[("⬅️ Orqaga", "ad:pm")]]))
+
+
+@admin.callback_query(F.data.startswith("pr:view:"))
+async def pr_view(call: CallbackQuery):
+    rid = int(call.data.split(":")[2])
+    async with pool.acquire() as c:
+        r = await c.fetchrow(
+            "SELECT r.*, u.name, u.username FROM pay_requests r LEFT JOIN users u ON u.id=r.user_id "
+            "WHERE r.id=$1", rid)
+    if not r:
+        return await call.answer("Topilmadi.", show_alert=True)
+    caption = (f"🧾 Chek #{rid} ({r['status']})\n👤 {r['name'] or '?'}" +
+               (f" @{r['username']}" if r["username"] else "") +
+               f" ({r['user_id']})\n💎 {r['days']} kun — {money(r['price'])} so'm")
+    markup = kb([[("✅ Tasdiqlash", f"pr:ok:{rid}"), ("❌ Rad etish", f"pr:no:{rid}")]]) \
+        if r["status"] == "pending" else None
+    if r["is_photo"]:
+        await bot.send_photo(call.message.chat.id, r["file_id"], caption=caption, reply_markup=markup)
+    else:
+        await bot.send_document(call.message.chat.id, r["file_id"], caption=caption, reply_markup=markup)
+    await call.answer()
+
+
+@admin.callback_query(F.data.startswith("pr:ok:") | F.data.startswith("pr:no:"))
+async def pr_decide(call: CallbackQuery):
+    _, act, rid = call.data.split(":")
+    rid = int(rid)
+    ok = act == "ok"
+    async with pool.acquire() as c:
+        async with c.transaction():
+            r = await c.fetchrow(
+                "UPDATE pay_requests SET status=$2, admin_id=$3, decided=now() "
+                "WHERE id=$1 AND status='pending' RETURNING user_id, days, price",
+                rid, "ok" if ok else "no", call.from_user.id)
+            if r and ok:
+                await c.execute(
+                    "INSERT INTO payments(user_id, days, amount, currency, charge_id) "
+                    "VALUES($1,$2,$3,'UZS',$4)", r["user_id"], r["days"], r["price"] * 100, f"manual:{rid}")
+                await c.execute(
+                    "UPDATE users SET pro_until = GREATEST(now(), COALESCE(pro_until, now())) "
+                    "+ make_interval(days => $2) WHERE id=$1", r["user_id"], r["days"])
+    if not r:
+        return await call.answer("Bu chek allaqachon ko'rib chiqilgan.", show_alert=True)
+    try:
+        ulang = await get_lang(r["user_id"])
+        await bot.send_message(r["user_id"], tr(ulang, "chek_ok" if ok else "chek_no", days=r["days"]))
+    except Exception:
+        logging.warning("chek natijasi userga yuborilmadi: %s", r["user_id"])
+    try:
+        mark = "✅ Tasdiqlandi, PRO yoqildi" if ok else "❌ Rad etildi"
+        await call.message.edit_caption(
+            caption=(call.message.caption or "") + f"\n\n{mark} — {call.from_user.full_name}",
+            reply_markup=None)
+    except Exception:
+        pass
+    await call.answer("✅ PRO yoqildi" if ok else "Rad etildi")
+
+
 # ---- Sozlamalar ----
 async def settings_view(call: CallbackQuery):
     rows = [[(f"{'✅' if CFG[k] == '1' else '❌'} {label}", f"ad:tg:{k}:set")]
@@ -2549,7 +2909,8 @@ async def del_cookies(m: Message, state: FSMContext):
 async def make_backup() -> bytes:
     data = {}
     async with pool.acquire() as c:
-        for tbl in ("users", "channels", "admins", "favorites", "promo", "promo_used", "payments"):
+        for tbl in ("users", "channels", "admins", "favorites", "promo", "promo_used", "payments",
+                    "pay_cards", "pay_plans", "pay_requests"):
             data[tbl] = [dict(r) for r in await c.fetch(f"SELECT * FROM {tbl}")]
         data["settings"] = [dict(r) for r in await c.fetch(
             "SELECT * FROM settings WHERE key <> 'cookies_data'")]
