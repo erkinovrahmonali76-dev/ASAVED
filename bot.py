@@ -600,8 +600,8 @@ async def notify_admins(text: str, key: str = "gen", every: int = 1200):
 
 
 def err_hint(s: str) -> str:
-    low = s.lower()
-    if "confirm you" in low or "not a bot" in low or "sign in" in low:
+    low = s.lower().replace("\u2019", "'")
+    if "not a bot" in low or "confirm you're" in low:
         return ("🚫 YouTube server IP sini bloklagan.\n"
                 "➜ 🩺 Tizim → 🍪 Cookies ni yangilang yoki PROXY_URL qo'ying.")
     if ("player response" in low or "unable to extract" in low or "requested format" in low
@@ -869,8 +869,8 @@ def yt_alternatives(q: str, dur=None, skip_id=None):
 
 
 def _is_block(s: str) -> bool:
-    s = s.lower()
-    return "confirm you" in s or "not a bot" in s
+    s = s.lower().replace("\u2019", "'")
+    return "not a bot" in s or "confirm you're" in s
 
 
 def download_audio(url: str, folder: str, fallback: str = None, dur=None, quality=None):
@@ -953,7 +953,7 @@ def download_audio(url: str, folder: str, fallback: str = None, dur=None, qualit
     first = yt_errs[0] if yt_errs else "noma'lum xato"
     msg = f"{'YouTube' if is_yt else 'Yuklash'}: {first[:230]}"
     if sc_err:
-        msg += f" | SoundCloud: {sc_err[:120]}"
+        msg += f" | SoundCloud: {sc_err[:220]}"
     raise RuntimeError(msg)
 
 
