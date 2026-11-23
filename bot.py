@@ -4,6 +4,7 @@ import io
 import sys
 import json
 import gzip
+import hmac
 import html
 import time
 import uuid
@@ -371,6 +372,50 @@ STR["en"].update({
     "cancelled": "Cancelled.",
 })
 
+STR["uz"].update({
+    "me_pro": "💎 <b>PRO faol</b>\nTugash sanasi: <b>{until}</b> ({left} kun qoldi)\nYuklash: cheksiz\nSifat: <b>{q} kbps</b>\n\n🎁 Taklif qilinganlar: <b>{refs}</b>\nUzaytirish: /buy",
+    "me_free": "👤 <b>Oddiy hisob</b>\nBugun yuklangan: <b>{used}/{limit}</b>\nSifat: <b>{q} kbps</b>\n\n💎 PRO: cheksiz yuklash + {pq} kbps sifat. Olish: /buy\n🎁 Taklif qilinganlar: <b>{refs}</b> (/ref)",
+    "pro_ending": "⏰ PRO muddatingiz ertaga tugaydi. Uzaytirish: /buy",
+})
+STR["ru"].update({
+    "me_pro": "💎 <b>PRO активен</b>\nДо: <b>{until}</b> (осталось дн.: {left})\nЗагрузки: без лимита\nКачество: <b>{q} кбит/с</b>\n\n🎁 Приглашено: <b>{refs}</b>\nПродлить: /buy",
+    "me_free": "👤 <b>Обычный аккаунт</b>\nСегодня скачано: <b>{used}/{limit}</b>\nКачество: <b>{q} кбит/с</b>\n\n💎 PRO: без лимита + {pq} кбит/с. Купить: /buy\n🎁 Приглашено: <b>{refs}</b> (/ref)",
+    "pro_ending": "⏰ Ваш PRO заканчивается завтра. Продлить: /buy",
+})
+STR["en"].update({
+    "me_pro": "💎 <b>PRO active</b>\nUntil: <b>{until}</b> ({left} days left)\nDownloads: unlimited\nQuality: <b>{q} kbps</b>\n\n🎁 Invited: <b>{refs}</b>\nExtend: /buy",
+    "me_free": "👤 <b>Free account</b>\nDownloaded today: <b>{used}/{limit}</b>\nQuality: <b>{q} kbps</b>\n\n💎 PRO: unlimited + {pq} kbps. Get it: /buy\n🎁 Invited: <b>{refs}</b> (/ref)",
+    "pro_ending": "⏰ Your PRO ends tomorrow. Extend: /buy",
+})
+
+STR["uz"].update({
+    "btn_buy": "💎 PRO olish",
+    "disc_note": "🔥 Sizda <b>{pct}% chegirma</b> bor (vaqt cheklangan)!",
+    "sale_limit": "🎁 Maxsus taklif: PRO'ga <b>{pct}% chegirma</b>, 24 soat amal qiladi.",
+    "sale_intro": "👋 Botdan foydalanayotganingizdan xursandmiz!\n\n💎 <b>PRO</b> bilan:\n• cheksiz yuklash\n"
+                  "• yuqori sifat ({pq} kbps)\n\n🎁 Yoki do'stlarni taklif qilib, PRO'ni <b>bepul</b> oling: /ref",
+    "sale_winback": "💎 PRO muddatingiz tugagan edi. Qaytganingiz uchun <b>{pct}% chegirma</b> — {days} kun amal qiladi!\n"
+                    "Cheksiz yuklash sizni kutmoqda.",
+})
+STR["ru"].update({
+    "btn_buy": "💎 Купить PRO",
+    "disc_note": "🔥 У вас <b>скидка {pct}%</b> (ограничена по времени)!",
+    "sale_limit": "🎁 Спецпредложение: <b>скидка {pct}%</b> на PRO, действует 24 часа.",
+    "sale_intro": "👋 Рады, что вы пользуетесь ботом!\n\n💎 С <b>PRO</b>:\n• загрузки без лимита\n"
+                  "• высокое качество ({pq} кбит/с)\n\n🎁 Или пригласите друзей и получите PRO <b>бесплатно</b>: /ref",
+    "sale_winback": "💎 Ваш PRO закончился. С возвращением — <b>скидка {pct}%</b>, действует {days} дн.!\n"
+                    "Загрузки без лимита ждут вас.",
+})
+STR["en"].update({
+    "btn_buy": "💎 Get PRO",
+    "disc_note": "🔥 You have a <b>{pct}% discount</b> (limited time)!",
+    "sale_limit": "🎁 Special offer: <b>{pct}% off</b> PRO, valid for 24 hours.",
+    "sale_intro": "👋 Glad you're using the bot!\n\n💎 With <b>PRO</b>:\n• unlimited downloads\n"
+                  "• higher quality ({pq} kbps)\n\n🎁 Or invite friends and get PRO <b>for free</b>: /ref",
+    "sale_winback": "💎 Your PRO has expired. Welcome back — <b>{pct}% off</b>, valid for {days} days!\n"
+                    "Unlimited downloads are waiting for you.",
+})
+
 ERR_KEYS = {"not_recognized", "recog_fail", "mp3_fail", "video_fail", "nothing", "round_fail", "recog_nores"}
 
 
@@ -407,7 +452,7 @@ ADMIN_SET = set()
 DEFAULTS = {
     "start_text": STR["uz"]["start"],
     "caption": "📩 @{bot} orqali yuklab olindi",
-    "pro_text": "💎 Cheksiz foydalanish uchun PRO oling — admin bilan bog'laning.",
+    "pro_text": "💎 PRO: cheksiz yuklash + 192 kbps sifat. Olish: /buy",
     "maint_text": "🛠 Botda texnik ishlar ketmoqda. Birozdan so'ng qaytadan urinib ko'ring.",
     "daily_limit": "20",
     "ref_days": "3",
@@ -418,6 +463,11 @@ DEFAULTS = {
     "feat_round": "1",
     "feat_voice": "1",
     "last_report": "",
+    "autoheal": "1",
+    "autosales": "1",
+    "sale_limit_pct": "10",
+    "sale_winback_pct": "20",
+    "heal_last_restart": "0",
 }
 CFG = {}
 TOGGLES = {
@@ -427,10 +477,14 @@ TOGGLES = {
     "feat_music": "Musiqa qidirish",
     "feat_voice": "Ovoz orqali topish",
     "feat_round": "Dumaloq video",
+    "autoheal": "🔧 Avto-tuzatish (YouTube nazorati)",
+    "autosales": "💰 Avto-sotuv (taklif/chegirma xabarlari)",
 }
 NUMS = {
     "daily_limit": "🔢 Kunlik limit",
     "ref_days": "🎁 Referal bonusi (kun)",
+    "sale_limit_pct": "🔥 Limit tugaganda chegirma (%)",
+    "sale_winback_pct": "🔙 PRO tugaganlarga chegirma (%)",
 }
 TEXTS = {
     "start_text": "✏️ Start matni (o'zbekcha)",
@@ -466,6 +520,12 @@ async def db_init():
         ALTER TABLE users ADD COLUMN IF NOT EXISTS last_seen TIMESTAMPTZ DEFAULT now();
         ALTER TABLE users ADD COLUMN IF NOT EXISTS lang TEXT DEFAULT 'uz';
         ALTER TABLE users ADD COLUMN IF NOT EXISTS referrer BIGINT;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS pro_warned TIMESTAMPTZ;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS disc_pct INT DEFAULT 0;
+        ALTER TABLE users ADD COLUMN IF NOT EXISTS disc_until TIMESTAMPTZ;
+        CREATE TABLE IF NOT EXISTS sales_log(
+            user_id BIGINT, kind TEXT, ts TIMESTAMPTZ DEFAULT now(),
+            PRIMARY KEY(user_id, kind));
         ALTER TABLE downloads ADD COLUMN IF NOT EXISTS platform TEXT;
         ALTER TABLE downloads ADD COLUMN IF NOT EXISTS ok BOOLEAN DEFAULT TRUE;
         ALTER TABLE downloads ADD COLUMN IF NOT EXISTS err TEXT;
@@ -788,6 +848,7 @@ YT_ATTEMPTS = [
     {"player_client": ["tv_simply", "android_vr"]},
 ]
 _YT_BEST = {"i": 0}  # oxirgi ishlagan klient: keyingi qo'shiqda birinchi shuni sinaymiz
+HEAL = {"fails": 0, "last_heal": 0.0, "down": False}
 _YT_BLOCK = {"until": 0.0}  # YouTube IP ni bloklagan bo'lsa, shu vaqtgacha uni qayta-qayta urmaymiz
 
 
@@ -897,6 +958,7 @@ def download_audio(url: str, folder: str, fallback: str = None, dur=None, qualit
             if idx is not None:
                 _YT_BEST["i"] = idx
                 _YT_BLOCK["until"] = 0.0
+                HEAL["fails"] = 0
             return res
         except Exception as ex:
             s = short_err(ex)
@@ -906,6 +968,8 @@ def download_audio(url: str, folder: str, fallback: str = None, dur=None, qualit
                 n_block += 1
                 if n_block >= 2:  # bu IP darajasidagi blok: boshqa klientlar ham yordam bermaydi
                     break
+    if is_yt and yt_errs:
+        HEAL["fails"] += 1  # barcha YouTube urinishlari o'tmadi (watchdog kuzatadi)
     blocked = n_block >= 2 or (n_block >= 1 and len(order) == 1)
     if is_yt and blocked:
         _YT_BLOCK["until"] = time.time() + 300
@@ -1135,7 +1199,7 @@ async def start(m: Message, state: FSMContext, command: CommandObject,
         if CFG["feat_music"] != "1" and not is_admin(uid):
             return await m.answer(tr(lang, "off"))
         if await over_limit(uid):
-            return await m.answer(limit_text(lang), parse_mode="HTML")
+            return await limit_reply(m, m.from_user.id, lang)
         meta = INLINE_META.get(vid) or (None, None)
         await send_mp3(m, uid, lang, f"https://www.youtube.com/watch?v={vid}", meta[0], meta[1])
 
@@ -1158,6 +1222,27 @@ async def cmd_ref(m: Message, lang: str = "uz"):
 @main.message(Command("lang"))
 async def cmd_lang(m: Message, lang: str = "uz"):
     await show_pick_lang(m, lang)
+
+
+@main.message(Command("me"))
+@main.message(Command("pro"))
+async def cmd_me(m: Message, lang: str = "uz"):
+    uid = m.from_user.id
+    async with pool.acquire() as c:
+        until = await c.fetchval("SELECT pro_until FROM users WHERE id=$1", uid)
+        refs = await c.fetchval("SELECT count(*) FROM users WHERE referrer=$1", uid)
+        used = await c.fetchval(
+            "SELECT count(*) FROM downloads WHERE user_id=$1 AND ok "
+            "AND kind IN ('video','music','round') AND ts > date_trunc('day', now())", uid)
+    now = datetime.now(timezone.utc)
+    if until and until > now:
+        left = max(1, -(-int((until - now).total_seconds()) // 86400))
+        text = tr(lang, "me_pro", until=lt(until, "%d.%m.%Y"), left=left, q=PRO_QUALITY, refs=refs)
+    else:
+        limit = int(CFG.get("daily_limit") or 0)
+        text = tr(lang, "me_free", used=used, limit=limit if limit > 0 else "∞",
+                  q=AUDIO_QUALITY, pq=PRO_QUALITY, refs=refs)
+    await m.answer(text, parse_mode="HTML")
 
 
 @main.message(Command("buy"))
@@ -1258,14 +1343,89 @@ async def get_cards():
         return await c.fetch("SELECT id, title, number, holder FROM pay_cards WHERE active ORDER BY id")
 
 
-async def show_buy(m: Message, lang: str):
+async def get_disc(uid: int) -> int:
+    try:
+        async with pool.acquire() as c:
+            v = await c.fetchval(
+                "SELECT disc_pct FROM users WHERE id=$1 AND disc_until > now()", uid)
+        return int(v or 0)
+    except Exception:
+        return 0
+
+
+def disc_price(price: int, pct: int) -> int:
+    return max(1, int(price) * (100 - pct) // 100)
+
+
+async def set_discount(uid: int, pct: int, days: float):
+    async with pool.acquire() as c:
+        await c.execute(
+            "UPDATE users SET disc_pct=$2, disc_until = now() + make_interval(secs => $3) WHERE id=$1",
+            uid, pct, float(days * 86400))
+
+
+async def clear_disc(uid: int):
+    try:
+        async with pool.acquire() as c:
+            await c.execute("UPDATE users SET disc_pct=0, disc_until=NULL WHERE id=$1", uid)
+    except Exception:
+        logging.exception("clear_disc")
+
+
+async def user_price(uid: int, days: int):
+    price = (await get_plans()).get(days)
+    if not price:
+        return None
+    pct = await get_disc(uid)
+    return disc_price(price, pct) if pct else price
+
+
+async def claim_nudge(uid: int, kind: str, days: int) -> bool:
+    """Shu turdagi xabar userga `days` kun ichida yuborilmagan bo'lsa True (va belgilab qo'yadi)."""
+    async with pool.acquire() as c:
+        r = await c.fetchval(
+            "INSERT INTO sales_log(user_id, kind) VALUES($1,$2) "
+            "ON CONFLICT (user_id, kind) DO UPDATE SET ts=now() "
+            "WHERE sales_log.ts < now() - make_interval(days => $3) RETURNING 1", uid, kind, days)
+    return bool(r)
+
+
+async def show_buy(m: Message, lang: str, uid: int = None):
+    uid = uid or m.from_user.id
     plans = await get_plans()
     cards = await get_cards()
     if not plans or not (PAY_TOKEN or cards):
         return await m.answer(tr(lang, "buy_none", pro=pro_text(lang)), parse_mode="HTML")
-    rows = [[(tr(lang, "price_fmt", days=d, price=money(p)), f"buy:{d}")]
-            for d, p in sorted(plans.items())]
-    await m.answer(tr(lang, "buy_pick"), parse_mode="HTML", reply_markup=kb(rows))
+    pct = await get_disc(uid)
+    rows = []
+    for d, p in sorted(plans.items()):
+        dp = disc_price(p, pct) if pct else p
+        label = tr(lang, "price_fmt", days=d, price=money(dp)) + (f" (-{pct}%)" if pct else "")
+        rows.append([(label, f"buy:{d}")])
+    head = tr(lang, "buy_pick")
+    if pct:
+        head = tr(lang, "disc_note", pct=pct) + "\n\n" + head
+    await m.answer(head, parse_mode="HTML", reply_markup=kb(rows))
+
+
+@main.callback_query(F.data == "buy_open")
+async def buy_open(call: CallbackQuery, lang: str = "uz"):
+    await call.answer()
+    await show_buy(call.message, lang, call.from_user.id)
+
+
+async def limit_reply(msg: Message, uid: int, lang: str):
+    """Limit tugaganda: PRO tugmasi + (bir marta) chegirma taklifi."""
+    text = limit_text(lang)
+    pct = int(CFG.get("sale_limit_pct") or 0)
+    try:
+        if CFG.get("autosales") == "1" and pct > 0 and not await get_disc(uid) \
+                and await claim_nudge(uid, "limit", 14):
+            await set_discount(uid, pct, 1)
+            text += "\n\n" + tr(lang, "sale_limit", pct=pct)
+    except Exception:
+        logging.exception("limit_reply")
+    await msg.answer(text, parse_mode="HTML", reply_markup=kb([[(tr(lang, "btn_buy"), "buy_open")]]))
 
 
 async def send_invoice_for(uid: int, lang: str, days: int, price: int):
@@ -1302,7 +1462,7 @@ async def buy_cb(call: CallbackQuery, state: FSMContext, lang: str = "uz"):
         days = int(call.data.split(":")[1])
     except ValueError:
         return await call.answer()
-    price = (await get_plans()).get(days)
+    price = await user_price(call.from_user.id, days)
     cards = await get_cards()
     if not price or not (PAY_TOKEN or cards):
         return await call.answer(tr(lang, "off"), show_alert=True)
@@ -1322,7 +1482,7 @@ async def buy_cb(call: CallbackQuery, state: FSMContext, lang: str = "uz"):
 async def buy_method(call: CallbackQuery, state: FSMContext, lang: str = "uz"):
     kind, d = call.data.split(":")
     days = int(d)
-    price = (await get_plans()).get(days)
+    price = await user_price(call.from_user.id, days)
     if not price:
         return await call.answer(tr(lang, "off"), show_alert=True)
     await call.answer()
@@ -1396,6 +1556,7 @@ async def paid(m: Message, lang: str = "uz"):
     except Exception:
         return
     await grant_pro(uid, days)
+    await clear_disc(uid)
     async with pool.acquire() as c:
         await c.execute(
             "INSERT INTO payments(user_id, days, amount, currency, charge_id) VALUES($1,$2,$3,$4,$5)",
@@ -1497,7 +1658,7 @@ async def get_by_vid(call: CallbackQuery, lang: str = "uz"):
         return await call.answer()
     if await over_limit(uid):
         await call.answer()
-        return await call.message.answer(limit_text(lang), parse_mode="HTML")
+        return await limit_reply(call.message, call.from_user.id, lang)
     async with pool.acquire() as c:
         row = await c.fetchrow("SELECT title, dur FROM audio_cache WHERE vid=$1", vid)
     await call.answer(tr(lang, "loading"))
@@ -1512,7 +1673,7 @@ async def to_round(m: Message, lang: str = "uz"):
     if CFG["feat_round"] != "1" and not is_admin(uid):
         return await m.answer(tr(lang, "off"))
     if await over_limit(uid):
-        return await m.answer(limit_text(lang), parse_mode="HTML")
+        return await limit_reply(m, m.from_user.id, lang)
     if m.video.file_size and m.video.file_size > 20 * 1024 * 1024:
         return await m.answer(tr(lang, "round_big"))
     wait = await m.answer(tr(lang, "round_wait"))
@@ -1609,7 +1770,7 @@ async def text_handler(m: Message, lang: str = "uz"):
         if not any(d in url for d in SUPPORTED):
             return await m.answer(tr(lang, "only_sup"))
         if await over_limit(uid):
-            return await m.answer(limit_text(lang), parse_mode="HTML")
+            return await limit_reply(m, m.from_user.id, lang)
         if uid in BUSY:
             return await m.answer(tr(lang, "busy"))
         BUSY.add(uid)
@@ -1814,7 +1975,7 @@ async def pick_song(call: CallbackQuery, lang: str = "uz"):
     uid = call.from_user.id
     if await over_limit(uid):
         await call.answer()
-        return await call.message.answer(limit_text(lang), parse_mode="HTML")
+        return await limit_reply(call.message, call.from_user.id, lang)
     await call.answer(tr(lang, "loading"))
     song = d["items"][int(idx)]
     await send_mp3(call.message, uid, lang, f"https://www.youtube.com/watch?v={song['id']}",
@@ -1842,7 +2003,7 @@ async def audio_from_link(call: CallbackQuery, lang: str = "uz"):
     uid = call.from_user.id
     if await over_limit(uid):
         await call.answer()
-        return await call.message.answer(limit_text(lang), parse_mode="HTML")
+        return await limit_reply(call.message, call.from_user.id, lang)
     await call.answer(tr(lang, "loading"))
     await send_mp3(call.message, uid, lang, url)
 
@@ -2643,6 +2804,7 @@ async def pr_decide(call: CallbackQuery):
                 await c.execute(
                     "UPDATE users SET pro_until = GREATEST(now(), COALESCE(pro_until, now())) "
                     "+ make_interval(days => $2) WHERE id=$1", r["user_id"], r["days"])
+                await c.execute("UPDATE users SET disc_pct=0, disc_until=NULL WHERE id=$1", r["user_id"])
     if not r:
         return await call.answer("Bu chek allaqachon ko'rib chiqilgan.", show_alert=True)
     try:
@@ -2818,9 +2980,11 @@ async def ad_ytest(call: CallbackQuery):
 
 
 def pip_update():
-    r = subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-U", "--pre", "--disable-pip-version-check",
-         "yt-dlp[default]"], capture_output=True, text=True, timeout=240)
+    cmd = [sys.executable, "-m", "pip", "install", "-U", "--pre", "--disable-pip-version-check",
+           "yt-dlp[default]"]
+    r = subprocess.run(cmd, capture_output=True, text=True, timeout=240)
+    if r.returncode != 0 and "externally-managed" in (r.stdout + r.stderr).lower():
+        r = subprocess.run(cmd + ["--break-system-packages"], capture_output=True, text=True, timeout=240)
     tail = "\n".join((r.stdout + r.stderr).strip().splitlines()[-3:])
     return r.returncode, tail
 
@@ -2987,6 +3151,154 @@ async def ad_admdel(call: CallbackQuery):
     await admins_view(call)
 
 
+# ====================== AVTO-TUZATISH (WATCHDOG) ======================
+WATCHDOG_MIN = int(os.getenv("WATCHDOG_MIN", "30"))  # necha daqiqada bir YouTube tekshiriladi
+
+
+def yt_probe():
+    """(ok, klient_indeksi, xato). Ishlagan klientni eslab qoladi."""
+    first = None
+    for i, args in enumerate(YT_ATTEMPTS):
+        try:
+            opts = base_opts() | {"skip_download": True, "format": "bestaudio/best"}
+            if args:
+                opts["extractor_args"] = {"youtube": args}
+            with yt_dlp.YoutubeDL(opts) as y:
+                y.extract_info(TEST_URL, download=False)
+            _YT_BEST["i"] = i
+            return True, i, ""
+        except Exception as ex:
+            err = short_err(ex)
+            if first is None:
+                first = err
+            if _is_block(err):  # IP bloki: boshqa klientlar yordam bermaydi
+                return False, None, err
+    return False, None, first or "noma'lum xato"
+
+
+async def self_heal(reason: str, err: str):
+    """YouTube ishlamayotgan bo'lsa: yt-dlp ni yangilab, kerak bo'lsa qayta ishga tushiradi, adminni ogohlantiradi."""
+    HEAL["down"] = True
+    hint = err_hint(err)
+    if _is_block(err):
+        return await notify_admins(
+            f"⛔ <b>YouTube yuklash ishlamayapti</b> ({e(reason)})\n{e(hint)}\n\n<code>{e(err[:250])}</code>",
+            key="heal_block", every=6 * 3600)
+    before = ver("yt-dlp")
+    try:
+        code, tail = await run(pip_update)
+    except Exception as ex:
+        code, tail = 1, short_err(ex)
+    after = ver("yt-dlp")
+    last = float(CFG.get("heal_last_restart") or 0)
+    if code == 0 and after != before and time.time() - last > 6 * 3600:
+        await set_cfg("heal_last_restart", str(time.time()))
+        await notify_admins(f"🔧 yt-dlp avtomatik yangilandi: {e(before)} → <b>{e(after)}</b>\n"
+                            f"Bot qayta ishga tushmoqda...", key="heal_upd", every=0)
+        await asyncio.sleep(2)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    state = "yangilash yordam bermadi" if code == 0 else "yangilab bo'lmadi"
+    await notify_admins(
+        f"⚠️ <b>YouTube yuklash xato</b> ({e(reason)})\nyt-dlp: {e(after)} — {state}\n"
+        f"{e(hint)}\n\n<code>{e(err[:250])}</code>\n\n/diag — batafsil", key="heal_fail", every=3 * 3600)
+
+
+async def watchdog_loop():
+    next_probe = time.time() + 120
+    while True:
+        try:
+            await asyncio.sleep(30)
+            if CFG.get("autoheal") != "1":
+                continue
+            due = time.time() >= next_probe
+            burst = HEAL["fails"] >= 4 and time.time() - HEAL["last_heal"] > 1200
+            if not (due or burst):
+                continue
+            next_probe = time.time() + WATCHDOG_MIN * 60
+            if burst:
+                HEAL["last_heal"] = time.time()
+            ok, _idx, err = await run(yt_probe)
+            if ok:
+                HEAL["fails"] = 0
+                if HEAL["down"]:
+                    HEAL["down"] = False
+                    await notify_admins("✅ YouTube yana ishlayapti.", key="heal_ok", every=0)
+            else:
+                HEAL["fails"] = 0
+                await self_heal("userlarda ketma-ket xato" if burst else "rejali tekshiruv", err)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("watchdog")
+
+
+async def post_boot_check():
+    ok, idx, err = await run(yt_probe)
+    await notify_admins(
+        f"♻️ Bot qayta ishga tushdi. yt-dlp: <b>{e(ver('yt-dlp'))}</b>\n"
+        + ("✅ YouTube ishlayapti." if ok else f"⚠️ YouTube hali ham xato:\n<code>{e(err[:250])}</code>"),
+        key="heal_boot", every=0)
+
+
+# ====================== AVTO-SOTUV ======================
+async def _sale_send(uid: int, text: str, markup=None):
+    try:
+        await bot.send_message(uid, text, parse_mode="HTML", reply_markup=markup)
+    except TelegramForbiddenError:
+        try:
+            async with pool.acquire() as c:
+                await c.execute("UPDATE users SET active=FALSE WHERE id=$1", uid)
+        except Exception:
+            pass
+    except TelegramRetryAfter as ex:
+        await asyncio.sleep(ex.retry_after)
+    except Exception:
+        pass
+    await asyncio.sleep(0.06)
+
+
+async def run_sales():
+    buy_kb = lambda lg: kb([[(tr(lg, "btn_buy"), "buy_open")]])
+    # 1) Yangi userlarga 3-kunda tanishtiruv
+    async with pool.acquire() as c:
+        rows = await c.fetch(
+            "SELECT id, lang FROM users WHERE joined < now() - interval '3 days' "
+            "AND joined > now() - interval '10 days' AND (pro_until IS NULL OR pro_until < now()) "
+            "AND NOT banned AND active LIMIT 200")
+    for r in rows:
+        if await claim_nudge(r["id"], "intro", 36500):
+            lg = r["lang"] or "uz"
+            await _sale_send(r["id"], tr(lg, "sale_intro", pq=PRO_QUALITY), buy_kb(lg))
+    # 2) PRO tugaganlarga chegirma (tugaganiga 1–30 kun bo'lganlar)
+    pct = int(CFG.get("sale_winback_pct") or 0)
+    if pct > 0:
+        async with pool.acquire() as c:
+            rows = await c.fetch(
+                "SELECT id, lang, pro_until FROM users WHERE pro_until IS NOT NULL "
+                "AND pro_until < now() - interval '1 day' AND pro_until > now() - interval '30 days' "
+                "AND NOT banned AND active LIMIT 200")
+        for r in rows:
+            if await claim_nudge(r["id"], "winback:" + r["pro_until"].strftime("%Y%m%d"), 36500):
+                lg = r["lang"] or "uz"
+                await set_discount(r["id"], pct, 3)
+                await _sale_send(r["id"], tr(lg, "sale_winback", pct=pct, days=3), buy_kb(lg))
+
+
+async def sales_loop():
+    while True:
+        try:
+            await asyncio.sleep(900)
+            if CFG.get("autosales") != "1":
+                continue
+            if not (10 <= datetime.now(LOCAL).hour < 21):  # tunda xabar yubormaymiz
+                continue
+            await run_sales()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logging.exception("sales")
+
+
 # ====================== FON VAZIFALAR ======================
 async def daily_report():
     async with pool.acquire() as c:
@@ -3012,6 +3324,9 @@ async def daily_report():
             pass
 
 
+_LAST_WARN = {"k": 0}
+
+
 async def scheduler_loop():
     while True:
         try:
@@ -3022,6 +3337,19 @@ async def scheduler_loop():
                     "RETURNING admin_id, chat_id, msg_id")
             for r in due:
                 spawn(do_broadcast(r["admin_id"], r["chat_id"], r["msg_id"]))
+            if int(time.time()) // 600 != _LAST_WARN["k"]:  # har 10 daqiqada
+                _LAST_WARN["k"] = int(time.time()) // 600
+                async with pool.acquire() as c:
+                    soon = await c.fetch(
+                        "UPDATE users SET pro_warned = pro_until WHERE pro_until > now() "
+                        "AND pro_until < now() + interval '1 day' "
+                        "AND pro_warned IS DISTINCT FROM pro_until RETURNING id, lang")
+                for r in soon:
+                    try:
+                        await bot.send_message(r["id"], tr(r["lang"] or "uz", "pro_ending"))
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.05)
             now = datetime.now(LOCAL)
             today = now.strftime("%Y-%m-%d")
             if now.hour >= REPORT_HOUR and CFG.get("last_report") != today:
@@ -3033,6 +3361,171 @@ async def scheduler_loop():
             raise
         except Exception:
             logging.exception("scheduler")
+
+
+# ====================== VEB SAYT + VEB ADMIN PANEL ======================
+WEB_PASS = os.getenv("ADMIN_WEB_PASSWORD")  # bo'sh bo'lsa, veb admin panel o'chiq
+SITE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "site.html")
+WEB_CSS = ("<style>:root{color-scheme:light dark;--bg:#fff;--fg:#111827;--cd:#f3f4f6;--ac:#2563eb}"
+           "@media(prefers-color-scheme:dark){:root{--bg:#111827;--fg:#f3f4f6;--cd:#1f2937;--ac:#60a5fa}}"
+           "body{font:15px system-ui;background:var(--bg);color:var(--fg);max-width:920px;margin:0 auto;padding:16px}"
+           ".c{background:var(--cd);border-radius:12px;padding:14px;margin:10px 0}"
+           ".g{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}"
+           ".n{font-size:26px;font-weight:700}a{color:var(--ac)}img{max-width:100%;max-height:360px;border-radius:8px}"
+           "input,button{font:inherit;padding:8px 12px;border-radius:8px;border:1px solid #8884}"
+           "button{background:var(--ac);color:#fff;border:0;cursor:pointer}.no{background:#dc2626}"
+           "form{display:inline}</style>")
+
+
+def wpage(body: str) -> web.Response:
+    return web.Response(text=f"<!doctype html><html lang=uz><meta charset=utf-8>"
+                             f"<meta name=viewport content='width=device-width,initial-scale=1'>"
+                             f"<title>Admin</title>{WEB_CSS}{body}", content_type="text/html")
+
+
+def web_tok() -> str:
+    return hmac.new(WEB_PASS.encode(), b"asaved-admin", "sha256").hexdigest()
+
+
+def web_ok(req) -> bool:
+    return bool(WEB_PASS) and hmac.compare_digest(req.cookies.get("sess", ""), web_tok())
+
+
+async def web_index(_):
+    try:
+        with open(SITE_FILE, encoding="utf-8") as f:
+            return web.Response(text=f.read().replace("ainstasavedbot", BOT_USERNAME),
+                                content_type="text/html")
+    except OSError:
+        return web.Response(text="ok")
+
+
+async def web_admin(req):
+    if not WEB_PASS:
+        return web.Response(text="Veb panel o'chiq: ADMIN_WEB_PASSWORD kiriting.", status=404)
+    if not web_ok(req):
+        return wpage("<h2>🔐 Admin</h2><form method=post action=/admin/login>"
+                     "<input type=password name=p placeholder=Parol autofocus> <button>Kirish</button></form>")
+    async with pool.acquire() as c:
+        u = await c.fetchrow(
+            "SELECT count(*) AS t, count(*) FILTER (WHERE joined > now() - interval '1 day') AS n, "
+            "count(*) FILTER (WHERE pro_until > now()) AS p FROM users")
+        d = await c.fetchrow(
+            "SELECT count(*) FILTER (WHERE ok AND kind <> 'search') AS ok, count(*) FILTER (WHERE NOT ok) AS er "
+            "FROM downloads WHERE ts > now() - interval '1 day'")
+        rev = await c.fetchval("SELECT COALESCE(sum(amount),0) FROM payments WHERE ts > now() - interval '30 days'")
+        reqs = await c.fetch(
+            "SELECT r.id, r.days, r.price, r.ts, u.name, u.username FROM pay_requests r "
+            "LEFT JOIN users u ON u.id=r.user_id WHERE r.status='pending' ORDER BY r.id DESC LIMIT 20")
+    box = lambda n, t: f"<div class=c><div class=n>{n}</div>{t}</div>"
+    h = ("<h2>📊 ASAVED BOT admin</h2><div class=g>"
+         + box(u["t"], "userlar") + box(u["n"], "yangi (24 soat)") + box(u["p"], "PRO faol")
+         + box(d["ok"], "yuklama (24 soat)") + box(d["er"], "xato (24 soat)")
+         + box(f"{rev / 100:,.0f}", "to'lov (30 kun)") + "</div>")
+    h += "<h3>🧾 Tekshirilmagan cheklar</h3>"
+    for r in reqs:
+        h += (f"<div class=c><b>#{r['id']}</b> {ulabel(r['name'], r['username'])} — {r['days']} kun, "
+              f"{money(r['price'])} so'm<br><a href=/admin/img/{r['id']} target=_blank>"
+              f"<img src=/admin/img/{r['id']} loading=lazy></a><br>"
+              f"<form method=post action=/admin/rcpt><input type=hidden name=id value={r['id']}>"
+              f"<button name=a value=ok>✅ Tasdiqlash</button> "
+              f"<button class=no name=a value=no>❌ Rad etish</button></form></div>")
+    if not reqs:
+        h += "<div class=c>Yo'q ✅</div>"
+    h += ("<h3>👤 Userni topish / PRO berish</h3><form method=get action=/admin/user>"
+          "<input name=q placeholder='ID, ism yoki @username'> <button>Qidirish</button></form>"
+          "<p><form method=post action=/admin/logout><button class=no>Chiqish</button></form></p>")
+    return wpage(h)
+
+
+async def web_login(req):
+    await asyncio.sleep(1)  # parol tanlashga qarshi sekinlashtirish
+    p = (await req.post()).get("p", "")
+    if WEB_PASS and hmac.compare_digest(p, WEB_PASS):
+        r = web.HTTPFound("/admin")
+        r.set_cookie("sess", web_tok(), httponly=True, samesite="Strict",
+                     secure=req.headers.get("X-Forwarded-Proto") == "https", max_age=7 * 86400)
+        raise r
+    return wpage("❌ Parol noto'g'ri. <a href=/admin>Qaytish</a>")
+
+
+async def web_logout(req):
+    r = web.HTTPFound("/admin")
+    r.del_cookie("sess")
+    raise r
+
+
+async def web_img(req):
+    if not web_ok(req):
+        raise web.HTTPForbidden()
+    async with pool.acquire() as c:
+        fid = await c.fetchval("SELECT file_id FROM pay_requests WHERE id=$1", int(req.match_info["rid"]))
+    if not fid:
+        raise web.HTTPNotFound()
+    buf = io.BytesIO()
+    await bot.download(fid, destination=buf)
+    data = buf.getvalue()
+    ct = "application/pdf" if data[:4] == b"%PDF" else ("image/png" if data[:4] == b"\x89PNG" else "image/jpeg")
+    return web.Response(body=data, content_type=ct)
+
+
+async def web_rcpt(req):
+    if not web_ok(req):
+        raise web.HTTPForbidden()
+    f = await req.post()
+    rid, ok = int(f.get("id", 0)), f.get("a") == "ok"
+    async with pool.acquire() as c:
+        async with c.transaction():
+            r = await c.fetchrow(
+                "UPDATE pay_requests SET status=$2, decided=now() WHERE id=$1 AND status='pending' "
+                "RETURNING user_id, days, price", rid, "ok" if ok else "no")
+            if r and ok:
+                await c.execute("INSERT INTO payments(user_id, days, amount, currency, charge_id) "
+                                "VALUES($1,$2,$3,'UZS',$4)", r["user_id"], r["days"], r["price"] * 100, f"manual:{rid}")
+                await c.execute("UPDATE users SET pro_until = GREATEST(now(), COALESCE(pro_until, now())) "
+                                "+ make_interval(days => $2), disc_pct=0, disc_until=NULL WHERE id=$1",
+                                r["user_id"], r["days"])
+    if r:
+        try:
+            await bot.send_message(r["user_id"], tr(await get_lang(r["user_id"]),
+                                                    "chek_ok" if ok else "chek_no", days=r["days"]))
+        except Exception:
+            pass
+    raise web.HTTPFound("/admin")
+
+
+async def web_user(req):
+    if not web_ok(req):
+        raise web.HTTPForbidden()
+    q = req.query.get("q", "").strip().lstrip("@")
+    async with pool.acquire() as c:
+        if q.isdigit():
+            rows = await c.fetch("SELECT id, name, username, pro_until FROM users WHERE id=$1", int(q))
+        else:
+            rows = await c.fetch("SELECT id, name, username, pro_until FROM users WHERE username ILIKE $1 "
+                                 "OR name ILIKE $1 LIMIT 20", f"%{q}%")
+    h = "<h2>👤 Natijalar</h2><a href=/admin>⬅️ Orqaga</a>"
+    for r in rows:
+        pro = lt(r["pro_until"], "%d.%m.%Y") if r["pro_until"] else "—"
+        h += (f"<div class=c><b>{ulabel(r['name'], r['username'])}</b> (<code>{r['id']}</code>) PRO: {pro}<br>"
+              f"<form method=post action=/admin/grant><input type=hidden name=id value={r['id']}>"
+              f"<input name=days type=number value=30 style='width:80px'> kun "
+              f"<button>💎 PRO berish</button></form></div>")
+    return wpage(h + ("" if rows else "<div class=c>Topilmadi.</div>"))
+
+
+async def web_grant(req):
+    if not web_ok(req):
+        raise web.HTTPForbidden()
+    f = await req.post()
+    uid, days = int(f.get("id", 0)), int(f.get("days", 0))
+    if uid and 0 < days <= 3650:
+        await grant_pro(uid, days)
+        try:
+            await bot.send_message(uid, tr(await get_lang(uid), "pro_given", days=days))
+        except Exception:
+            pass
+    raise web.HTTPFound("/admin")
 
 
 # ====================== ISHGA TUSHIRISH ======================
@@ -3053,7 +3546,15 @@ async def main_run():
     BOT_USERNAME = (await bot.get_me()).username
 
     app = web.Application()
-    app.router.add_get("/", health)
+    app.router.add_get("/", web_index)
+    app.router.add_get("/health", health)
+    app.router.add_get("/admin", web_admin)
+    app.router.add_post("/admin/login", web_login)
+    app.router.add_post("/admin/logout", web_logout)
+    app.router.add_get("/admin/img/{rid}", web_img)
+    app.router.add_post("/admin/rcpt", web_rcpt)
+    app.router.add_get("/admin/user", web_user)
+    app.router.add_post("/admin/grant", web_grant)
     runner = web.AppRunner(app)
     await runner.setup()
     await web.TCPSite(runner, "0.0.0.0", int(os.getenv("PORT", "8000"))).start()
@@ -3066,12 +3567,17 @@ async def main_run():
             BotCommand(command="ref", description="🎁 Do'st taklif qilish"),
             BotCommand(command="promo", description="🎟 Promo-kod"),
             BotCommand(command="buy", description="💎 PRO"),
+            BotCommand(command="me", description="👤 Hisobim / PRO holati"),
             BotCommand(command="lang", description="🌐 Til / Язык"),
         ])
     except Exception:
         logging.exception("set_my_commands")
 
     spawn(scheduler_loop())
+    spawn(watchdog_loop())
+    spawn(sales_loop())
+    if time.time() - float(CFG.get("heal_last_restart") or 0) < 300:
+        spawn(post_boot_check())
     dp.include_router(admin)
     dp.include_router(main)
     await bot.delete_webhook(drop_pending_updates=True)
